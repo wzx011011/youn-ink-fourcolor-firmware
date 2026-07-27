@@ -67,3 +67,8 @@ _research/
 .zcode/
 tools/almanac_preview.png
 tools/bing_wallpaper.jpg
+# 测试图片产物
+tools/compare_*.png
+tools/prev_*.png
+tools/user_image.jpg
+tools/*.jpg
