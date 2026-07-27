@@ -3,6 +3,7 @@ idf_component_register(
         "src/cbin_font.c"
         "src/SourceHanSansSC_Medium_slim.c"
         "src/SourceHanSansSC_Regular_slim.c"
+        "src/SourceHanSansSC_Big48_slim.c"
         "src/font_zectrix_16_1.c"
         "src/font_zectrix_48_1.c"
         "src/weather_icons/weather_icons_16.c"

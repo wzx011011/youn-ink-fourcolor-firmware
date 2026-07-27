@@ -213,6 +213,7 @@ const char* RawDrawUiManager::GetPageTitle(RawDrawPageId page) {
         case RawDrawPageId::FontDebug:  return "对齐测试";
         case RawDrawPageId::FontMetrics: return "字体指标";
         case RawDrawPageId::APTransfer: return "传图模式";
+        case RawDrawPageId::Screenshot: return "看板";
         default:               return "未知";
     }
 }
@@ -250,6 +251,7 @@ RawDrawUiManager::RawDrawUiManager()
     font_metrics_renderer_ = std::make_unique<rawdraw::FontMetricsRenderer>();
     ap_transfer_renderer_ = std::make_unique<rawdraw::ApTransferRenderer>();
     ap_transfer_server_ = std::make_unique<rawdraw::ApTransferServer>();
+    screenshot_renderer_ = std::make_unique<rawdraw::ScreenshotRenderer>();
     ap_transfer_server_->SetStateCallback(
         [this](rawdraw::ApTransferServer::ServerState state, const std::string& message) {
             if (!ap_transfer_renderer_) return;
@@ -318,6 +320,20 @@ RawDrawUiManager::RawDrawUiManager()
     ap_transfer_server_->SetShowPhotoCallback([this](const std::string& photo_id) {
         return ShowPhotoById(photo_id);
     });
+    // Web remote-control: switch page + list pages
+    ap_transfer_server_->SetSwitchPageCallback([this](const std::string& page_id) {
+        return SwitchPageById(page_id);
+    });
+    ap_transfer_server_->SetPageListCallback([this]() {
+        return GetPageListJson();
+    });
+    // Board pipeline: receive a NAS-rendered image and cache it for the
+    // generic Screenshot page.
+    ap_transfer_server_->SetScreenshotCallback(
+        [this](const std::string& label, const uint8_t* data, uint32_t size,
+               int w, int h, bool is_2bpp) {
+            return SetScreenshot(label, data, size, w, h, is_2bpp);
+        });
 
     // Initialize status bar defaults
     status_bar_data_.page_title = GetPageTitle(RawDrawPageId::Gallery);
@@ -554,6 +570,7 @@ rawdraw::PageRenderer* RawDrawUiManager::GetRendererForPage(RawDrawPageId page) 
         case RawDrawPageId::FontDebug:  return font_debug_renderer_.get();
         case RawDrawPageId::FontMetrics: return font_metrics_renderer_.get();
         case RawDrawPageId::APTransfer: return ap_transfer_renderer_.get();
+        case RawDrawPageId::Screenshot: return screenshot_renderer_.get();
         default:               return nullptr;
     }
 }
@@ -644,10 +661,19 @@ bool RawDrawUiManager::TryDisplayCurrentPhotoRaw4Color() {
     return shown;
 }
 
-const std::array<RawDrawUiManager::QuickSwitchItem, 2>& RawDrawUiManager::GetQuickSwitchItems() {
-    static const std::array<QuickSwitchItem, 2> kItems = {{
-        {RawDrawPageId::Gallery, "相册", FA_SETTINGS_IMAGE},
-        {RawDrawPageId::Settings, "设置", FA_SETTINGS_GEAR},
+const std::array<RawDrawUiManager::QuickSwitchItem, 11>& RawDrawUiManager::GetQuickSwitchItems() {
+    static const std::array<QuickSwitchItem, 11> kItems = {{
+        {RawDrawPageId::Gallery,      "相册",     FA_SETTINGS_IMAGE},
+        {RawDrawPageId::Weather,      "天气",     nullptr},
+        {RawDrawPageId::Calendar,     "日历",     nullptr},
+        {RawDrawPageId::News,         "热点",     nullptr},
+        {RawDrawPageId::Ebook,        "电子书",   nullptr},
+        {RawDrawPageId::LifeBar,      "人生进度", nullptr},
+        {RawDrawPageId::YearProgress, "年度进度", nullptr},
+        {RawDrawPageId::Almanac,      "老黄历",   nullptr},
+        {RawDrawPageId::Screenshot,   "看板",     nullptr},
+        {RawDrawPageId::Log,          "日志",     nullptr},
+        {RawDrawPageId::Settings,     "设置",     FA_SETTINGS_GEAR},
 #if 0
         // Hardware-only alignment pages are intentionally hidden from the
         // user-facing quick switch. Keep the renderer code for calibration,
@@ -829,9 +855,13 @@ bool RawDrawUiManager::HandleInput(const rawdraw::ButtonEvent& event) {
     bool handled = renderer->HandleInput(event);
 
     if (handled) {
-        if (navigation_click) {
-            input_refresh_locked_.store(true, std::memory_order_release);
-        }
+        // NOTE: we intentionally do NOT lock input during the EPD refresh any
+        // more. The refresh task reads from tx_buf (copied from the framebuffer
+        // under dirty_mutex), so updating the framebuffer here while a refresh
+        // is in-flight is safe — the in-flight refresh keeps its snapshot, and
+        // the new TriggerRefresh below queues a follow-up refresh with the
+        // updated content. This makes navigation feel instant instead of
+        // blocking for the ~15s four-colour full refresh.
         // Re-render the framebuffer with updated state
         auto* fb = lcd_ ? lcd_->GetFramebuffer() : nullptr;
         if (fb) {
@@ -871,7 +901,18 @@ void RawDrawUiManager::RenderAll(uint8_t* fb, int width, int height) {
         current_page_ == RawDrawPageId::Ebook &&
         ebook_renderer_ &&
         ebook_renderer_->IsPortraitReader();
-    const bool chrome_free_page = false;
+    // Information-display pages go chrome-free (no status bar, no outer frame)
+    // to maximise screen real estate on the 400x300 panel and let the content
+    // breathe. A tiny corner status overlay is drawn instead by DrawCornerStatus
+    // (see below). Chat/Gallery/Ebook/Settings keep their chrome.
+    const bool chrome_free_page =
+        current_page_ == RawDrawPageId::LifeBar ||
+        current_page_ == RawDrawPageId::YearProgress ||
+        current_page_ == RawDrawPageId::Almanac ||
+        current_page_ == RawDrawPageId::Weather ||
+        current_page_ == RawDrawPageId::WeatherDetail ||
+        current_page_ == RawDrawPageId::News ||
+        current_page_ == RawDrawPageId::Screenshot;
 
     // Update central_text based on current page state
     status_bar_data_.central_text.clear();
@@ -908,6 +949,10 @@ void RawDrawUiManager::RenderAll(uint8_t* fb, int width, int height) {
         // outer frames; this single frame keeps the Macintosh-style window edge
         // consistent across all pages.
         DrawGlobalPageFrame(fb, width, height);
+    } else if (chrome_free_page) {
+        // Chrome-free info pages: draw a tiny corner overlay (time/wifi/battery)
+        // so the user still sees connectivity + clock without the 28px status bar.
+        DrawCornerStatus(fb, width, height);
     }
 
     // Draw voice wakeup overlay if active
@@ -917,6 +962,69 @@ void RawDrawUiManager::RenderAll(uint8_t* fb, int width, int height) {
 
     if (quick_switch_open_) {
         DrawQuickSwitchOverlay(fb, width, height);
+    }
+}
+
+void RawDrawUiManager::DrawCornerStatus(uint8_t* fb, int width, int height) {
+    // Minimal top-right overlay for chrome-free pages. Compact cluster:
+    // [time]  [wifi bars]  [battery%]. Total ~14px tall, drawn semi-transparent
+    // style (small font + simple glyphs) so it doesn't dominate the content.
+    using namespace rawdraw;
+    if (!fb) return;
+    const auto& theme = ThemeManager::Get();
+    const Color text_col = theme.ColorFor(ThemeToken::TextSecondary);
+    const Color wifi_col = theme.ColorFor(ThemeToken::SuccessLike);
+    const Color danger_col = theme.ColorFor(ThemeToken::Danger);
+    const lv_font_t* small_font = &font_zectrix_16_1;
+
+    const int right_pad = 6;
+    const int top_y = 3;
+    int x_cursor = width - right_pad;
+
+    // Battery percentage (right-most): simple "NN%" text
+    if (status_bar_data_.battery_level >= 0) {
+        char buf[12];
+        snprintf(buf, sizeof(buf), "%d%%", status_bar_data_.battery_level);
+        const int w = MeasureTextWidth(buf, small_font);
+        const int bx = x_cursor - w;
+        const int by = InkCenteredTextTopY(small_font, buf, top_y + 6, 0);
+        DrawText(fb, width, bx, by, buf, small_font, text_col, height);
+        x_cursor = bx - 6;
+    }
+
+    // WiFi bars (4 small bars), reused pattern from DrawStatusBar
+    {
+        const int sig_bar_w = 2;
+        const int sig_bar_gap = 1;
+        const int sig_bar_heights[] = {4, 6, 8, 10};
+        const int group_w = 4 * sig_bar_w + 3 * sig_bar_gap;
+        const int base_x = x_cursor - group_w;
+        const int base_y = top_y + 12;  // bottom of bars
+        const Color col = status_bar_data_.wifi_connected ? wifi_col : danger_col;
+        for (int i = 0; i < 4; ++i) {
+            int bx = base_x + i * (sig_bar_w + sig_bar_gap);
+            int bh = sig_bar_heights[i];
+            if (status_bar_data_.wifi_connected) {
+                DrawRect(fb, width, {bx, base_y - bh, sig_bar_w, bh}, col);
+            } else {
+                DrawRectBorder(fb, width, {bx, base_y - bh, sig_bar_w, bh}, 1, col);
+            }
+        }
+        x_cursor = base_x - 8;
+    }
+
+    // Time (left-most in the cluster): "HH:MM" from RTC
+    {
+        time_t now = 0;
+        time(&now);
+        struct tm tm_now = {};
+        localtime_r(&now, &tm_now);
+        char time_buf[8] = {};
+        strftime(time_buf, sizeof(time_buf), "%H:%M", &tm_now);
+        const int w = MeasureTextWidth(time_buf, small_font);
+        const int tx = x_cursor - w;
+        const int ty = InkCenteredTextTopY(small_font, time_buf, top_y + 6, 0);
+        DrawText(fb, width, tx, ty, time_buf, small_font, text_col, height);
     }
 }
 
@@ -1313,6 +1421,97 @@ void RawDrawUiManager::RequestFullRefresh() {
 
 void RawDrawUiManager::RequestActivePageRefresh() {
     active_page_refresh_pending_.store(true, std::memory_order_release);
+}
+
+void RawDrawUiManager::UpdateWeather(const WeatherData& data) {
+    // May be invoked from the weather_api esp_timer task, so we must not touch
+    // the framebuffer here. Update both weather renderers' cached data, then
+    // request an async refresh; the main loop will re-render if visible.
+    if (weather_renderer_) {
+        weather_renderer_->Update(data);
+    }
+    if (weather_detail_renderer_) {
+        weather_detail_renderer_->Update(data);
+    }
+    // Only request a redraw if a weather page is currently visible, to avoid
+    // needless refreshes while the user is on another page.
+    if (current_page_ == RawDrawPageId::Weather ||
+        current_page_ == RawDrawPageId::WeatherDetail) {
+        active_page_refresh_pending_.store(true, std::memory_order_release);
+    }
+}
+
+// Stable string ids for the web remote-control API. Keep these in sync with
+// GetPageTitle and the RawDrawPageId enum. These are the ids the web UI sends
+// to /page/show.
+namespace {
+struct PageIdEntry {
+    const char* id;        // stable string id, ASCII (URL-safe)
+    const char* name;      // Chinese label for the web UI
+    RawDrawPageId page;
+};
+
+// User-facing pages exposed via the web control panel. Internal/debug pages
+// (FontDebug, FontMetrics, APTransfer) are intentionally omitted.
+const PageIdEntry kUserPages[] = {
+    {"gallery",      "相册",     RawDrawPageId::Gallery},
+    {"weather",      "天气",     RawDrawPageId::Weather},
+    {"calendar",     "日历",     RawDrawPageId::Calendar},
+    {"news",         "热点",     RawDrawPageId::News},
+    {"ebook",        "电子书",   RawDrawPageId::Ebook},
+    {"lifebar",      "人生进度", RawDrawPageId::LifeBar},
+    {"yearprogress", "年度进度", RawDrawPageId::YearProgress},
+    {"almanac",      "老黄历",   RawDrawPageId::Almanac},
+    {"screenshot",   "看板",     RawDrawPageId::Screenshot},
+    {"log",          "日志",     RawDrawPageId::Log},
+    {"settings",     "设置",     RawDrawPageId::Settings},
+};
+constexpr size_t kUserPageCount = sizeof(kUserPages) / sizeof(kUserPages[0]);
+}  // namespace
+
+bool RawDrawUiManager::SwitchPageById(const std::string& page_id) {
+    for (size_t i = 0; i < kUserPageCount; ++i) {
+        if (page_id == kUserPages[i].id) {
+            SwitchPage(kUserPages[i].page);
+            ESP_LOGI(kTag, "Web remote: switch to %s -> %s",
+                     page_id.c_str(), kUserPages[i].name);
+            return true;
+        }
+    }
+    ESP_LOGW(kTag, "Web remote: unknown page id '%s'", page_id.c_str());
+    return false;
+}
+
+bool RawDrawUiManager::SetScreenshot(const std::string& label, const uint8_t* data,
+                                     uint32_t size, int w, int h, bool is_2bpp) {
+    if (!screenshot_renderer_ || !data || size == 0) return false;
+    screenshot_renderer_->SetImage(data, size, w, h, is_2bpp, label);
+    ESP_LOGI(kTag, "Screenshot pushed: '%s' %ux%u %u bytes %s",
+             label.c_str(), w, h, size, is_2bpp ? "2bpp" : "1bpp");
+    // If the user is currently viewing the board page, refresh immediately so
+    // the new content appears without a manual page toggle. If they are on
+    // another page, the image is cached and shows the next time they open 看板.
+    if (current_page_ == RawDrawPageId::Screenshot) {
+        RequestActivePageRefresh();
+    }
+    return true;
+}
+
+std::string RawDrawUiManager::GetPageListJson() const {
+    // Returns: [{"id":"gallery","name":"相册","active":true},...]
+    std::string json = "[";
+    for (size_t i = 0; i < kUserPageCount; ++i) {
+        if (i > 0) json += ",";
+        json += "{\"id\":\"";
+        json += kUserPages[i].id;
+        json += "\",\"name\":\"";
+        json += kUserPages[i].name;
+        json += "\",\"active\":";
+        json += (current_page_ == kUserPages[i].page) ? "true" : "false";
+        json += "}";
+    }
+    json += "]";
+    return json;
 }
 
 bool RawDrawUiManager::ShowPhotoById(const std::string& photo_id) {

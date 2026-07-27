@@ -160,18 +160,22 @@ void WeatherRenderer::Render(uint8_t* fb, int width, int height) {
     const Color accent = theme.ColorFor(ThemeToken::Accent);
 
     const int content_top = Style::kStatusBarHeight + 2;
-    DrawStyledRect(fb, width, {0, Style::kStatusBarHeight, width, height - Style::kStatusBarHeight}, bg_style);
+    DrawStyledRect(fb, width, {0, 0, width, height}, bg_style);
 
     if (!has_data_) {
         const char* empty_text = "暂无天气数据";
-        const char* hint = "长按刷新";
+        const char* hint = "未配置和风天气 API Key";
+        const char* hint2 = "请在 NAS 网页设置或 menuconfig 配置";
         int text_w = MeasureTextWidth(empty_text, font_);
         int hint_w = MeasureTextWidth(hint, font_);
-        int center_y = content_top + (height - content_top) / 2;
-        const int empty_baseline = CalcBaselineY(font_, center_y - 10, Style::kVisualTextOffset);
-        const int hint_baseline = CalcBaselineY(font_, center_y + 16, Style::kVisualTextOffset);
+        int hint2_w = MeasureTextWidth(hint2, font_);
+        int center_y = height / 2;
+        const int empty_baseline = CalcBaselineY(font_, center_y - 20, Style::kVisualTextOffset);
+        const int hint_baseline = CalcBaselineY(font_, center_y + 10, Style::kVisualTextOffset);
+        const int hint2_baseline = CalcBaselineY(font_, center_y + 30, Style::kVisualTextOffset);
         DrawText(fb, width, (width - text_w) / 2, TopYFromBaseline(font_, empty_baseline), empty_text, font_, text);
         DrawText(fb, width, (width - hint_w) / 2, TopYFromBaseline(font_, hint_baseline), hint, font_, secondary);
+        DrawText(fb, width, (width - hint2_w) / 2, TopYFromBaseline(font_, hint2_baseline), hint2, font_, secondary);
     } else {
         std::string location = city_name_.empty() ? current_data_.city : city_name_;
         if (location.empty()) location = "杭州";

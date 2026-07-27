@@ -20,6 +20,7 @@
 // External font references
 extern const lv_font_t SourceHanSansSC_Regular_slim;
 extern const lv_font_t SourceHanSansSC_Medium_slim;
+extern const lv_font_t SourceHanSansSC_Big48_slim;  // 48px 大字号(方案C:固件原生清晰渲染)
 extern const lv_font_t weather_icons_48;
 
 // Weekday characters (matches calendar.cc)
@@ -97,11 +98,68 @@ static const char* kJiTable[][3] = {
     {"纳采", "订盟", "嫁娶"},
 };
 
+// ============================================================
+// Local almanac computations (no network needed)
+// All simplified traditional approximations.
+// ============================================================
+
+// 12 zodiac animals. 丙午年: 午=马. Earthly branch index = (year - 4) % 12.
+static const char* kZodiac[] = {"鼠","牛","虎","兔","龙","蛇","马","羊","猴","鸡","狗","猪"};
+static const char* GetZodiac(int year) {
+    return kZodiac[((year - 4) % 12 + 12) % 12];
+}
+
+// Western zodiac by month/day. Clean lookup table.
+static const char* GetConstellation(int month, int day) {
+    // start day of the "second" sign for each month (1=Jan).
+    // e.g. Jan: day<20 -> 摩羯, day>=20 -> 水瓶
+    static const int kStart[13] = {0, 20, 19, 21, 20, 21, 22, 23, 23, 23, 24, 23, 22};
+    static const char* kFirst[13] = {nullptr,"摩羯","水瓶","双鱼","白羊","金牛","双子","巨蟹","狮子","处女","天秤","天蝎","射手"};
+    static const char* kSecond[13] = {nullptr,"水瓶","双鱼","白羊","金牛","双子","巨蟹","狮子","处女","天秤","天蝎","射手","摩羯"};
+    if (month < 1 || month > 12) return "";
+    return day < kStart[month] ? kFirst[month] : kSecond[month];
+}
+
+// Chong (冲) + Sha (煞) from earthly branch of day.
+// Day branch index derived from a reference epoch is complex; use day-of-year as
+// a stable pseudo-index so the value still rotates daily.
+static const char* kChongAnimals[] = {"马","羊","猴","鸡","狗","猪","鼠","牛","虎","兔","龙","蛇"};
+static const char* kSha[] = {"南","东","北","西","南","东","北","西","南","东","北","西"};
+static void GetChongSha(int year, int month, int day, char* out_chong, size_t chong_sz,
+                        char* out_sha, size_t sha_sz) {
+    // day-of-year as pseudo branch index
+    static const int dim[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    int doy = day;
+    for (int m = 1; m < month; m++) {
+        doy += (m==2 && ((year%4==0&&year%100!=0)||(year%400==0))) ? 29 : dim[m-1];
+    }
+    int idx = ((doy - 1) % 12 + 12) % 12;
+    // 冲 = opposite of idx branch's animal
+    int opp = (idx + 6) % 12;
+    snprintf(out_chong, chong_sz, "冲%s", kChongAnimals[opp]);
+    snprintf(out_sha, sha_sz, "煞%s", kSha[idx]);
+}
+
+// Auspicious directions (喜神/财神/福神) — simplified, rotates by day index.
+static const char* kDirections[] = {"正东","正南","正西","正北","东南","东北","西南","西北"};
+static void GetAuspiciousDirections(int year, int month, int day,
+                                    const char*& xishen, const char*& caishen, const char*& fushen) {
+    static const int dim[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    int doy = day;
+    for (int m = 1; m < month; m++) {
+        doy += (m==2 && ((year%4==0&&year%100!=0)||(year%400==0))) ? 29 : dim[m-1];
+    }
+    xishen = kDirections[(doy) % 8];
+    caishen = kDirections[(doy + 3) % 8];
+    fushen = kDirections[(doy + 5) % 8];
+}
+
 namespace rawdraw {
 
 AlmanacRenderer::AlmanacRenderer()
     : font_(&SourceHanSansSC_Regular_slim)
     , title_font_(&SourceHanSansSC_Medium_slim)
+    , big_font_(&SourceHanSansSC_Big48_slim)
     , icon_font_(&weather_icons_48) {
 }
 
@@ -140,79 +198,102 @@ void AlmanacRenderer::RefreshData() {
 void AlmanacRenderer::Render(uint8_t* fb, int width, int height) {
     if (!fb) return;
 
-    const int content_top = Style::kStatusBarHeight + kTitleBarH + Style::kSpacingXS;
-    int y = content_top + Style::kSpacingMD;
+    // 大数字焦点型布局(方案C:固件原生渲染,无锯齿)
+    // 参考网页版 board/templates/almanac.html 的 grid 布局:
+    //   顶部:日期条(公历 + 农历年/生肖) — 红色下划线分隔
+    //   左下:黄色焦点块 + 48px 农历大字(视觉中心)
+    //   右下:宜(黑框)/忌(红框)两张卡片,只留关键词
     const auto& theme = ThemeManager::Get();
     const Color text = theme.ColorFor(ThemeToken::TextPrimary);
-    const Color secondary = theme.ColorFor(ThemeToken::TextSecondary);
-    const Color accent = theme.ColorFor(ThemeToken::Accent);
-    const Color danger = theme.ColorFor(ThemeToken::Danger);
-    const Color border = theme.ColorFor(ThemeToken::Border);
+    const Color accent = theme.ColorFor(ThemeToken::Accent);        // 红
+    const Color success = theme.ColorFor(ThemeToken::SuccessLike);   // 黄
+    const Color danger = theme.ColorFor(ThemeToken::Danger);         // 红(忌)
 
-    // === Title bar ===
-    DrawTitleBar(fb, width);
-
-    // === Large lunar year name + date ===
-    // e.g. "丙午年 三月初八"
-    char lunar_full[32];
-    if (lunar_.lunar_month > 0 && lunar_.lunar_day > 0) {
-        snprintf(lunar_full, sizeof(lunar_full), "%s年 %s%s",
-                 lunar_year_name_, GetLunarMonthName(lunar_.lunar_month),
-                 GetLunarDayName(lunar_.lunar_day));
-    } else {
-        snprintf(lunar_full, sizeof(lunar_full), "%s年", lunar_year_name_);
+    // ===== 顶部日期条(全宽,y=0~70)=====
+    {
+        const int pad_x = 24;
+        const int y = 18;
+        // 左:丙午年 马
+        char year_buf[24];
+        snprintf(year_buf, sizeof(year_buf), "%s年 %s",
+                 lunar_year_name_, GetZodiac(year_));
+        DrawText(fb, width, pad_x, y, year_buf, title_font_, text);
+        // 右:公历 + 农历
+        char solar_buf[40];
+        snprintf(solar_buf, sizeof(solar_buf), "%d.%d.%d 周%s",
+                 year_, month_, day_, kWeekdayFull[weekday_]);
+        int sw = MeasureTextWidth(solar_buf, title_font_);
+        DrawText(fb, width, width - pad_x - sw, y, solar_buf, title_font_, text);
+        // 右下小字:农历月 + 节气
+        char lunar_buf[32];
+        if (solar_term_) {
+            snprintf(lunar_buf, sizeof(lunar_buf), "%s月 %s",
+                     GetLunarMonthName(lunar_.lunar_month), solar_term_);
+        } else {
+            snprintf(lunar_buf, sizeof(lunar_buf), "%s月",
+                     GetLunarMonthName(lunar_.lunar_month));
+        }
+        int lw = MeasureTextWidth(lunar_buf, font_);
+        DrawText(fb, width, width - pad_x - lw, y + title_font_->line_height + 2,
+                 lunar_buf, font_, text);
+        // 红色下划线分隔
+        DrawHLine(fb, width, 70, pad_x, width - pad_x, accent);
+        DrawHLine(fb, width, 71, pad_x, width - pad_x, accent);
     }
 
-    // Draw centered
-    int lunar_w = MeasureTextWidth(lunar_full, title_font_);
-    int lunar_x = (width - lunar_w) / 2;
-    DrawText(fb, width, lunar_x, y, lunar_full, title_font_, accent);
-    y += title_font_->line_height + Style::kSpacingMD;
-
-    // === Gregorian date ===
-    char greg_buf[64];
-    snprintf(greg_buf, sizeof(greg_buf), "公历 %d年%d月%d日 %s",
-             year_, month_, day_, kWeekdayFull[weekday_]);
-    int greg_w = MeasureTextWidth(greg_buf, font_);
-    int greg_x = (width - greg_w) / 2;
-    DrawText(fb, width, greg_x, y, greg_buf, font_, secondary);
-    y += font_->line_height + Style::kSpacingMD;
-
-    // === Solar term (if today) ===
-    if (solar_term_) {
-        char st_buf[32];
-        snprintf(st_buf, sizeof(st_buf), "【%s】", solar_term_);
-        int st_w = MeasureTextWidth(st_buf, title_font_);
-        int st_x = (width - st_w) / 2;
-        DrawText(fb, width, st_x, y, st_buf, title_font_, accent);
-        y += title_font_->line_height + Style::kSpacingMD;
+    // ===== 左下:黄色焦点块 + 48px 农历大字(x=0~200, y=80~300)=====
+    {
+        const int block_x = 0;
+        const int block_y = 80;
+        const int block_w = 200;
+        const int block_h = height - block_y;  // 220
+        // 黄色填充块
+        DrawRect(fb, width, {block_x, block_y, block_w, block_h}, success);
+        // 农历月(24px,顶部)
+        const char* month_str = GetLunarMonthName(lunar_.lunar_month);
+        int mw = MeasureTextWidth(month_str, title_font_);
+        DrawText(fb, width, block_x + (block_w - mw) / 2, block_y + 20,
+                 month_str, title_font_, text);
+        // 农历日(48px 大字,焦点)— 红色
+        const char* day_str = GetLunarDayName(lunar_.lunar_day);
+        int dw = MeasureTextWidth(day_str, big_font_);
+        int day_y = block_y + 20 + title_font_->line_height + 16;
+        DrawText(fb, width, block_x + (block_w - dw) / 2, day_y,
+                 day_str, big_font_, accent);
+        // 生肖(16px,底部小字点缀)
+        const char* animal = GetZodiac(year_);
+        int aw = MeasureTextWidth(animal, font_);
+        DrawText(fb, width, block_x + (block_w - aw) / 2,
+                 day_y + big_font_->line_height + 12,
+                 animal, font_, text);
     }
 
-    // === Divider ===
-    DrawHLine(fb, width, y, Style::kSpacingLG, width - Style::kSpacingLG, border);
-    y += Style::kSpacingSM;
+    // ===== 右下:宜/忌卡片(x=210~400, y=80~300)=====
+    {
+        const int card_x = 210;
+        const int card_w = width - card_x - 18;  // ~172
+        const int card_pad = 12;
+        const int gap = 10;
+        const int card_h = (height - 80 - gap - 14) / 2;  // ~98 each
+        // 宜卡片(黑框)
+        const int yi_y = 80;
+        DrawRectBorder(fb, width, {card_x, yi_y, card_w, card_h}, 3, BLACK);
+        DrawText(fb, width, card_x + card_pad, yi_y + 10, "宜", big_font_, text);
+        int label_w = MeasureTextWidth("宜", big_font_);
+        // 宜条目(只显示前2个,16px)
+        char yi_items[32];
+        snprintf(yi_items, sizeof(yi_items), "%s %s", yi_[0], yi_[1]);
+        DrawText(fb, width, card_x + card_pad, yi_y + card_h - font_->line_height - 12,
+                 yi_items, font_, text);
 
-    // === 宜 (auspicious) section ===
-    DrawText(fb, width, Style::kSpacingLG, y, "宜", title_font_, accent);
-    int yi_label_w = MeasureTextWidth("宜", title_font_);
-    int yi_start = Style::kSpacingLG + yi_label_w + Style::kSpacingSM;
-    int yi_y = y;
-    for (int i = 0; i < 4; i++) {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%s", yi_[i]);
-        DrawText(fb, width, yi_start + i * 60, yi_y, buf, font_, text);
-    }
-    y += font_->line_height + Style::kSpacingMD;
-
-    // === 忌 (inauspicious) section ===
-    DrawText(fb, width, Style::kSpacingLG, y, "忌", title_font_, danger);
-    int ji_label_w = MeasureTextWidth("忌", title_font_);
-    int ji_start = Style::kSpacingLG + ji_label_w + Style::kSpacingSM;
-    int ji_y = y;
-    for (int i = 0; i < 3; i++) {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%s", ji_[i]);
-        DrawText(fb, width, ji_start + i * 60, ji_y, buf, font_, text);
+        // 忌卡片(红框)
+        const int ji_y = yi_y + card_h + gap;
+        DrawRectBorder(fb, width, {card_x, ji_y, card_w, card_h}, 3, danger);
+        DrawText(fb, width, card_x + card_pad, ji_y + 10, "忌", big_font_, danger);
+        char ji_items[32];
+        snprintf(ji_items, sizeof(ji_items), "%s %s", ji_[0], ji_[1]);
+        DrawText(fb, width, card_x + card_pad, ji_y + card_h - font_->line_height - 12,
+                 ji_items, font_, text);
     }
 
     needs_full_refresh_ = false;

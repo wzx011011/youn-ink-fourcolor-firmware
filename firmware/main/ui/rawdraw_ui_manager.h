@@ -22,6 +22,7 @@
 #include "ui/renderers/rawdraw/weather_renderer.h"
 #include "ui/renderers/rawdraw/weather_detail_renderer.h"
 #include "ui/renderers/rawdraw/news_renderer.h"
+#include "ui/renderers/rawdraw/screenshot_renderer.h"
 #include "ui/renderers/rawdraw/lifebar_renderer.h"
 #include "ui/renderers/rawdraw/almanac_renderer.h"
 #include "ui/renderers/rawdraw/log_renderer.h"
@@ -76,6 +77,7 @@ enum class RawDrawPageId {
     FontDebug = 15,
     FontMetrics = 16,
     APTransfer = 17,
+    Screenshot = 18,
     Count,
 };
 
@@ -364,6 +366,26 @@ public:
     int GetGallerySlideshowIntervalMinutes() const { return gallery_slideshow_interval_minutes_; }
     bool ShowPhotoById(const std::string& photo_id);
 
+    // Push a rendered board image (from NAS Playwright pipeline) into the
+    // generic Screenshot page. The image bytes are copied; caller retains
+    // ownership. Safe to call from the HTTP task. If Screenshot is the active
+    // page, the screen refreshes immediately; otherwise the image shows the
+    // next time the user opens the 看板 page.
+    bool SetScreenshot(const std::string& label, const uint8_t* data,
+                       uint32_t size, int w, int h, bool is_2bpp);
+
+    // Push a fresh weather payload into weather / weather-detail renderers
+    // and refresh the screen if either is visible. Safe to call from the
+    // weather_api timer task (it only posts a refresh request).
+    void UpdateWeather(const WeatherData& data);
+
+    // Web remote-control support. SwitchPageById accepts a stable string id
+    // (gallery / weather / calendar / ...) from the HTTP API and switches the
+    // screen. GetPageListJson returns a JSON array describing the user-facing
+    // pages for the web control panel.
+    bool SwitchPageById(const std::string& page_id);
+    std::string GetPageListJson() const;
+
     /**
      * @brief Trigger EPD refresh immediately
      *
@@ -451,6 +473,7 @@ private:
     std::unique_ptr<rawdraw::FontMetricsRenderer> font_metrics_renderer_;
     std::unique_ptr<rawdraw::ApTransferRenderer> ap_transfer_renderer_;
     std::unique_ptr<rawdraw::ApTransferServer> ap_transfer_server_;
+    std::unique_ptr<rawdraw::ScreenshotRenderer> screenshot_renderer_;
 
     // Refresh callback (provided by CustomLcdDisplay)
     RefreshCallback refresh_cb_;
@@ -487,6 +510,10 @@ private:
     void RefreshActivePage(bool urgent = false);
     void RefreshActivePageRect(const rawdraw::Rect& rect, bool urgent = false);
     void DrawStatusBar(uint8_t* fb, int width, int height);
+    // Minimal corner overlay for chrome-free (fullscreen) info pages: draws a
+    // tiny time + wifi + battery cluster at the top-right so the user still
+    // sees connectivity/clock without the full 28px status bar.
+    void DrawCornerStatus(uint8_t* fb, int width, int height);
     void ArmClockRefreshTimer();
     void ArmTransientRefreshTimer(int delay_ms = 2000);
     static void OnClockRefreshTimer(void* arg);
@@ -502,7 +529,7 @@ private:
     void RestoreQuickSwitchBacking(uint8_t* fb);
     void RedrawQuickSwitchOnly(uint8_t* fb);
     void RefreshRect(const rawdraw::Rect& rect, bool urgent = false);
-    static const std::array<QuickSwitchItem, 2>& GetQuickSwitchItems();
+    static const std::array<QuickSwitchItem, 11>& GetQuickSwitchItems();
     void MarkAllRenderersFullRefresh();
 };
 

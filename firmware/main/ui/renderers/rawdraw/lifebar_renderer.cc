@@ -168,32 +168,30 @@ void LifeBarRenderer::Render(uint8_t* fb, int width, int height) {
         int msg_w = MeasureTextWidth(msg, small_font_);
         int msg_x = (width - msg_w) / 2;
         msg_x = (msg_x + 7) & ~7;
-        // FIX: 改用 InkCenteredTextTopY，避免 line_height 居中导致中文偏上
-        // 参见 wiki/projects/notellm-baseline-alignment.md
         int msg_y = InkCenteredTextTopY(small_font_, msg, height / 2, 0);
         DrawText(fb, width, msg_x, msg_y, msg, small_font_, text);
-
-        const char* hint = "在设置中重新开启";
-        int hint_w = MeasureTextWidth(hint, small_font_);
-        int hint_x = (width - hint_w) / 2;
-        hint_x = (hint_x + 7) & ~7;
-        int hint_y = msg_y + small_font_->line_height + Style::kSpacingSM;
-        DrawText(fb, width, hint_x, hint_y, hint, small_font_, secondary);
         needs_full_refresh_ = false;
         return;
     }
 
     UpdateStats();
 
-    int y = Style::kStatusBarHeight + Style::kSpacingMD;
+    // Fullscreen layout (page is chrome-free now). Use the whole 400x300 panel.
+    // Layout from top:
+    //   y=8   title "人生进度" (small, top-left feel)
+    //   y=30  big circular gauge (r=95) centred horizontally, with % inside
+    //   below gauge: 2 lines of stats (age / days remaining)
+    //   bottom: 1 short quote line
+    int y = 8;
 
-    // === Header ===
-    RenderHeader(fb, width, y);
-    y += title_font_->line_height + Style::kSpacingXXS;
+    // Title (left-aligned, compact, secondary colour so it doesn't shout)
+    {
+        const char* title = "人生进度";
+        DrawText(fb, width, 16, y, title, small_font_, secondary);
+    }
 
-    // === Circular gauge ===
-    RenderGauge(fb, width, y, height - y - Style::kSpacingMD);
-    // Gauge uses the remaining vertical space
+    // === Circular gauge — the hero element ===
+    RenderGauge(fb, width, y + small_font_->line_height + 4, height);
 
     needs_full_refresh_ = false;
 }
@@ -218,94 +216,75 @@ void LifeBarRenderer::RenderHeader(uint8_t* fb, int width, int y) const {
     DrawText(fb, width, sub_x, sub_y, sub, small_font_, secondary);
 }
 
-void LifeBarRenderer::RenderGauge(uint8_t* fb, int width, int y_start, int available_h) const {
+void LifeBarRenderer::RenderGauge(uint8_t* fb, int width, int y_start, int screen_height) const {
     const auto& theme = ThemeManager::Get();
-    const PaintStyle progress_style = theme.Component(ComponentRole::Progress);
     const Color text = theme.ColorFor(ThemeToken::TextPrimary);
     const Color secondary = theme.ColorFor(ThemeToken::TextSecondary);
-    const Color accent = theme.ColorFor(ThemeToken::Accent);
-    // Gauge geometry
-    const int gauge_r = 70;
-    const int gauge_thickness = 8;
+    const Color accent = theme.ColorFor(ThemeToken::Accent);      // 红 = 已过
+    const Color success = theme.ColorFor(ThemeToken::SuccessLike); // 黄 = 剩余背景环
+
+    // Gauge geometry — enlarged now that the page is fullscreen.
+    const int gauge_r = 92;
+    const int gauge_thickness = 10;
     const int cx = width / 2;
-    int cy = y_start + gauge_r + 5;
+    // Vertically centre the gauge in the area below the title.
+    const int cy = y_start + gauge_r + 4;
 
-    // Check if gauge fits within available space
-    const int gauge_bottom = cy + gauge_r;
-    const int content_bottom = height_ - Style::kSpacingSM;
-
-    // If gauge doesn't fit, shift up
-    if (gauge_bottom > content_bottom) {
-        cy = content_bottom - gauge_r;
-    }
-
-    // === Draw circular progress ===
-    Point center = {cx, cy};
+    const Point center = {cx, cy};
+    // Dual-colour ring: remaining = yellow background, elapsed = red fill.
     DrawCircularProgress(fb, width, center, gauge_r, gauge_thickness,
-                         life_pct_, progress_style.bg, progress_style.fg);
+                         life_pct_, success, accent);
 
-    // === Center text: percentage number only (no overlapping text) ===
+    // === Inside the ring: big percentage ===
     char pct_buf[16];
     snprintf(pct_buf, sizeof(pct_buf), "%d%%", life_pct_);
     int pct_w = MeasureTextWidth(pct_buf, title_font_);
     int pct_x = cx - pct_w / 2;
     pct_x = (pct_x + 7) & ~7;
-    // FIX: 改用 InkCenteredTextTopY，避免 line_height 居中导致中文偏上
-    // 参见 wiki/projects/notellm-baseline-alignment.md
-    int pct_y = InkCenteredTextTopY(title_font_, pct_buf, cy, 0);
+    int pct_y = InkCenteredTextTopY(title_font_, pct_buf, cy - 6, 0);
     DrawText(fb, width, pct_x, pct_y, pct_buf, title_font_, accent);
+    // Small "已过" label under the number
+    const char* label = "已过";
+    int lw = MeasureTextWidth(label, small_font_);
+    DrawText(fb, width, (cx - lw / 2 + 7) & ~7,
+             pct_y + title_font_->line_height, label, small_font_, secondary);
 
-    // === Stats below gauge ===
-    int stats_y = cy + gauge_r + gauge_thickness + Style::kSpacingMD;
-    const int bottom_limit = height_ - Style::kSpacingSM;
-
-    // Calculate how much space stats need (3 lines minimum)
-    const int stats_min_h = small_font_->line_height * 3 + Style::kSpacingXS * 2;
-    // Quote needs at least 2 lines
-    const int quote_min_h = small_font_->line_height * 2 + Style::kSpacingXS;
-
+    // === Stats below gauge: 2 compact lines ===
+    const int bottom_limit = screen_height - 8;
+    int stats_y = cy + gauge_r + gauge_thickness / 2 + 12;
     char buf[64];
 
-    // Line 1: Age (consistent with gauge percentage)
+    // Line 1: age + days elapsed (primary text)
     if (stats_y + small_font_->line_height <= bottom_limit) {
-        snprintf(buf, sizeof(buf), "%d岁%d月  已过%d%%", age_years_, age_months_, life_pct_);
+        snprintf(buf, sizeof(buf), "%d岁%d月 · 已度过 %d 天",
+                 age_years_, age_months_, days_elapsed_);
         int w = MeasureTextWidth(buf, small_font_);
-        int x = (width - w) / 2;
-        x = (x + 7) & ~7;
-        DrawText(fb, width, x, stats_y, buf, small_font_, text);
-        stats_y += small_font_->line_height + Style::kSpacingXS;
+        DrawText(fb, width, ((width - w) / 2 + 7) & ~7, stats_y, buf, small_font_, text);
+        stats_y += small_font_->line_height + 2;
     }
 
-    // Line 2: Days remaining
+    // Line 2: days + weekends remaining (secondary)
     if (stats_y + small_font_->line_height <= bottom_limit) {
-        snprintf(buf, sizeof(buf), "剩余天数 %d天", days_remaining_);
+        snprintf(buf, sizeof(buf), "余生约 %d 天 · 还有 %d 个周末",
+                 days_remaining_, weekends_remaining_);
         int w = MeasureTextWidth(buf, small_font_);
-        int x = (width - w) / 2;
-        x = (x + 7) & ~7;
-        DrawText(fb, width, x, stats_y, buf, small_font_, secondary);
-        stats_y += small_font_->line_height + Style::kSpacingXS;
+        DrawText(fb, width, ((width - w) / 2 + 7) & ~7, stats_y, buf, small_font_, secondary);
+        stats_y += small_font_->line_height + 6;
     }
 
-    // Line 3: Weekends remaining
+    // Bottom: one short quote line (rotated daily) — only first line to stay clean
     if (stats_y + small_font_->line_height <= bottom_limit) {
-        snprintf(buf, sizeof(buf), "剩余周末 %d个", weekends_remaining_);
-        int w = MeasureTextWidth(buf, small_font_);
-        int x = (width - w) / 2;
-        x = (x + 7) & ~7;
-        DrawText(fb, width, x, stats_y, buf, small_font_, secondary);
-        stats_y += small_font_->line_height + Style::kSpacingXS;
-    }
-
-    // === Motivational quote at bottom — only if enough room ===
-    int quote_start_y = stats_y + Style::kSpacingXS;
-    if (quote_start_y + quote_min_h <= bottom_limit) {
-        RenderQuote(fb, width, quote_start_y);
-    } else {
-        // Try squeeze: skip gap, draw directly
-        if (stats_y + quote_min_h <= bottom_limit) {
-            RenderQuote(fb, width, stats_y);
-        }
-        // else: not enough space, skip quote entirely
+        time_t now = time(nullptr);
+        struct tm tm_buf;
+        localtime_r(&now, &tm_buf);
+        const char* quote = kQuotes[(tm_buf.tm_yday) % kNumQuotes];
+        // Take only up to the first newline
+        char line[64] = {};
+        int i = 0;
+        const char* p = quote;
+        while (*p && *p != '\n' && i < 63) line[i++] = *p++;
+        int w = MeasureTextWidth(line, small_font_);
+        DrawText(fb, width, ((width - w) / 2 + 7) & ~7, stats_y, line, small_font_, secondary);
     }
 }
 

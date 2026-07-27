@@ -32,8 +32,9 @@ private:
     static const char* GetLunarMonthName(int month);
     static const char* GetLunarDayName(int day);
 
-    const lv_font_t* font_;
-    const lv_font_t* title_font_;
+    const lv_font_t* font_;        // 16px Regular — 正文/小字
+    const lv_font_t* title_font_;  // 24px Medium — 标题/分区
+    const lv_font_t* big_font_;    // 48px Big    — 农历大字焦点
     const lv_font_t* icon_font_;
 
     int year_ = 0;

@@ -123,62 +123,59 @@ void YearProgressRenderer::Render(uint8_t* fb, int width, int height) {
     const PaintStyle progress_style = theme.Component(ComponentRole::Progress);
     const Color text = theme.ColorFor(ThemeToken::TextPrimary);
     const Color secondary = theme.ColorFor(ThemeToken::TextSecondary);
-    const Color accent = theme.ColorFor(ThemeToken::Accent);
+    const Color accent = theme.ColorFor(ThemeToken::Accent);      // 红 = 当月
+    const Color success = theme.ColorFor(ThemeToken::SuccessLike); // 黄 = 已过月
 
     // Refresh time periodically
     UpdateTime();
 
-    const int content_top = Style::kStatusBarHeight + 8;  // 8px gap after status bar
-    const int content_bottom = height - Style::kSpacingSM;
+    // Fullscreen layout (page is chrome-free). Compact vertical rhythm so the
+    // month grid at the bottom always fits.
+    const int content_top = 10;
+    const int content_bottom = height - 6;
     int y = content_top;
 
-    // === Section 1: Title "年度进度" — independent Y, >=20px gap below ===
-    const char* title = "年度进度";
-    int title_w = MeasureTextWidth(title, title_font_);
-    int title_x = (width - title_w) / 2;
-    title_x = (title_x + 7) & ~7;
-    DrawText(fb, width, title_x, y, title, title_font_, text);
-    y += title_font_->line_height + 20;  // 20px gap after title
+    // === Section 1: Title (left-aligned, compact) ===
+    DrawText(fb, width, 16, y, "年度进度", small_font_, secondary);
+    y += small_font_->line_height + 2;
 
-    // === Section 2: Date line — independent Y, >=20px gap below ===
-    char date_buf[48];
-    FormatDate(date_buf, sizeof(date_buf));
-    int date_w = MeasureTextWidth(date_buf, body_font_);
-    int date_x = (width - date_w) / 2;
-    date_x = (date_x + 7) & ~7;
-    DrawText(fb, width, date_x, y, date_buf, body_font_, secondary);
-    y += body_font_->line_height + 20;  // 20px gap after date
+    // === Section 2: Big percentage + date on one row ===
+    {
+        // Date on the left (secondary), big % on the right (accent)
+        char date_buf[48];
+        FormatDate(date_buf, sizeof(date_buf));
+        DrawText(fb, width, 16, y, date_buf, small_font_, secondary);
 
-    // === Section 3: Large progress percentage — independent Y, >=20px gap below ===
-    char pct_str[16];
-    snprintf(pct_str, sizeof(pct_str), "%d%%", progress_pct_);
-    int pct_w = MeasureTextWidth(pct_str, &SourceHanSansSC_Medium_slim);
-    int pct_x = (width - pct_w) / 2;
-    pct_x = (pct_x + 7) & ~7;
-    DrawText(fb, width, pct_x, y, pct_str, &SourceHanSansSC_Medium_slim, accent);
-    y += title_font_->line_height + 20;  // 20px gap after percentage
+        char pct_str[16];
+        snprintf(pct_str, sizeof(pct_str), "%d%%", progress_pct_);
+        int pct_w = MeasureTextWidth(pct_str, &SourceHanSansSC_Medium_slim);
+        int pct_x = width - 16 - pct_w;
+        int pct_y = InkCenteredTextTopY(&SourceHanSansSC_Medium_slim, pct_str,
+                                        y + small_font_->line_height / 2, 0);
+        DrawText(fb, width, pct_x, pct_y, pct_str, &SourceHanSansSC_Medium_slim, accent);
+        y += SourceHanSansSC_Medium_slim.line_height + 4;
+    }
 
-    // === Section 4: Progress bar — independent Y, >=20px gap below ===
-    int bar_w = (width * 80) / 100;
-    bar_w = (bar_w + 7) & ~7;
-    int bar_h = Style::kProgressHeight + 4;
-    int bar_x = (width - bar_w) / 2;
-    bar_x = (bar_x + 7) & ~7;
+    // === Section 3: Full-width progress bar ===
+    {
+        int bar_w = width - 32;  // 16px margins each side
+        bar_w = (bar_w + 7) & ~7;
+        int bar_h = Style::kProgressHeight + 4;
+        DrawStyledProgress(fb, width, {16, y, bar_w, bar_h}, progress_pct_,
+                           progress_style, Style::kBorderRadiusPill);
+        y += bar_h + 2;
+    }
 
-    DrawStyledProgress(fb, width, {bar_x, y, bar_w, bar_h}, progress_pct_,
-                       progress_style, Style::kBorderRadiusPill);
-    y += bar_h + 20;  // 20px gap after progress bar
+    // === Section 4: "第X天 / 共Y天" small line ===
+    {
+        char day_str[64];
+        snprintf(day_str, sizeof(day_str), "第 %d 天 / 共 %d 天", day_of_year_, total_days_);
+        int w = MeasureTextWidth(day_str, small_font_);
+        DrawText(fb, width, ((width - w) / 2 + 7) & ~7, y, day_str, small_font_, secondary);
+        y += small_font_->line_height + 6;
+    }
 
-    // === Section 5: "第X天/共Y天" — independent Y, >=20px gap below ===
-    char day_str[64];
-    snprintf(day_str, sizeof(day_str), "第%d天 / 共%d天", day_of_year_, total_days_);
-    int day_str_w = MeasureTextWidth(day_str, small_font_);
-    int day_str_x = (width - day_str_w) / 2;
-    day_str_x = (day_str_x + 7) & ~7;
-    DrawText(fb, width, day_str_x, y, day_str, small_font_, secondary);
-    y += small_font_->line_height + 20;  // 20px gap after day count
-
-    // === Section 6: Month overview (only if enough space) ===
+    // === Section 5: Month overview — now always fits ===
     if (y < content_bottom - small_font_->line_height * 2) {
         RenderMonthGrid(fb, width, height, y);
     }

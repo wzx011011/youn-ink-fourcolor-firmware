@@ -76,6 +76,7 @@ set(SOURCES
     "ui/renderers/rawdraw/photo_gallery.cc"
     "ui/renderers/rawdraw/photo_detail_renderer.cc"
     "ui/renderers/rawdraw/news_renderer.cc"
+    "ui/renderers/rawdraw/screenshot_renderer.cc"
     "ui/renderers/rawdraw/font_debug_renderer.cc"
     "ui/renderers/rawdraw/font_metrics_renderer.cc"
     "ui/renderers/rawdraw/ap_transfer_renderer.cc"

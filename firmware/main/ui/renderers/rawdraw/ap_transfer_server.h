@@ -64,6 +64,24 @@ public:
     void SetPhotosChangedCallback(std::function<void()> callback);
     void SetShowPhotoCallback(std::function<bool(const std::string& photo_id)> callback);
 
+    // Page switching (web remote-control): web UI calls /page/show to switch the
+    // device screen to a given page (gallery / weather / calendar / ...).
+    // callback returns true if the page id was recognised and switched to.
+    void SetSwitchPageCallback(std::function<bool(const std::string& page_id)> callback);
+    // Returns a JSON array of available pages, e.g.
+    // [{"id":"gallery","name":"相册"},...].  Used by the web UI to render the
+    // control panel dynamically.
+    void SetPageListCallback(std::function<std::string()> callback);
+
+    // Board pipeline: NAS pushes a rendered 2bpp/1bpp image for the generic
+    // Screenshot page. The callback receives the human-readable label (e.g.
+    // "老黄历") plus the raw pixel bytes and dimensions. Returns true on
+    // acceptance. Wired by RawDrawUiManager to ScreenshotRenderer::SetImage.
+    using ScreenshotCallback = std::function<bool(const std::string& label,
+                                                  const uint8_t* data, uint32_t size,
+                                                  int w, int h, bool is_2bpp)>;
+    void SetScreenshotCallback(ScreenshotCallback callback);
+
 private:
     enum class TransferMode {
         kNone,
@@ -84,6 +102,9 @@ private:
     std::function<void(int slideshow_interval_minutes)> settings_changed_callback_;
     std::function<void()> photos_changed_callback_;
     std::function<bool(const std::string& photo_id)> show_photo_callback_;
+    std::function<bool(const std::string& page_id)> switch_page_callback_;
+    std::function<std::string()> page_list_callback_;  // returns JSON array string
+    ScreenshotCallback screenshot_callback_;
 
     bool StartAccessPoint();
     const std::string& GetApIp() const { return ap_ip_; }
@@ -100,6 +121,9 @@ private:
     static esp_err_t PhotoMetaHandler(httpd_req_t* req);
     static esp_err_t PhotoMoveHandler(httpd_req_t* req);
     static esp_err_t PhotoShowHandler(httpd_req_t* req);
+    static esp_err_t PageShowHandler(httpd_req_t* req);
+    static esp_err_t ScreenshotSetHandler(httpd_req_t* req);
+    static esp_err_t PageListHandler(httpd_req_t* req);
     
     // Notify state change
     void NotifyState(ServerState state, const std::string& message);

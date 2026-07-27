@@ -438,7 +438,7 @@ bool ApTransferServer::StartAccessPoint() {
 
 bool ApTransferServer::StartHttpServer() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 16;
     config.max_open_sockets = 4;
     config.recv_wait_timeout = 30;  // Large images take time
     config.send_wait_timeout = 10;
@@ -539,6 +539,36 @@ bool ApTransferServer::StartHttpServer() {
         .user_ctx = this
     };
     if (httpd_register_uri_handler(server_, &photo_show_uri) != ESP_OK) return false;
+
+    // Web remote-control: switch the device screen to a given page.
+    httpd_uri_t page_show_uri = {
+        .uri = "/page/show",
+        .method = HTTP_POST,
+        .handler = PageShowHandler,
+        .user_ctx = this
+    };
+    if (httpd_register_uri_handler(server_, &page_show_uri) != ESP_OK) return false;
+
+    // Web remote-control: list available pages for the control panel.
+    httpd_uri_t page_list_uri = {
+        .uri = "/page/list",
+        .method = HTTP_GET,
+        .handler = PageListHandler,
+        .user_ctx = this
+    };
+    if (httpd_register_uri_handler(server_, &page_list_uri) != ESP_OK) return false;
+
+    // Board pipeline: NAS pushes a rendered 2bpp/1bpp image to display on the
+    // generic Screenshot page. Body = raw pixel bytes; query carries format +
+    // optional label. Mirrors /upload but routes the bytes to the board page
+    // instead of the photo gallery.
+    httpd_uri_t screenshot_set_uri = {
+        .uri = "/screenshot/set",
+        .method = HTTP_POST,
+        .handler = ScreenshotSetHandler,
+        .user_ctx = this
+    };
+    if (httpd_register_uri_handler(server_, &screenshot_set_uri) != ESP_OK) return false;
 
     ESP_LOGI(kTag, "HTTP server started at http://%s/", ap_ip_.c_str());
     return true;
@@ -915,6 +945,113 @@ esp_err_t ApTransferServer::PhotoShowHandler(httpd_req_t* req) {
     return ok ? ESP_OK : ESP_FAIL;
 }
 
+esp_err_t ApTransferServer::PageShowHandler(httpd_req_t* req) {
+    // Web remote-control: switch device screen to a given page.
+    // Body: {"page":"weather"}  (page id, one of /page/list)
+    cJSON* root = ReadJsonBody(req);
+    if (!root) {
+        SendJson(req, "{\"success\":false,\"error\":\"bad_json\"}");
+        return ESP_FAIL;
+    }
+    char page[32] = {};
+    CopyJsonString(root, "page", page, sizeof(page));
+    cJSON_Delete(root);
+
+    auto* self = static_cast<ApTransferServer*>(req->user_ctx);
+    const bool ok = self && self->switch_page_callback_ && page[0] && self->switch_page_callback_(page);
+    SendJson(req, ok ? "{\"success\":true}" : "{\"success\":false,\"error\":\"unknown_page\"}");
+    return ok ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t ApTransferServer::PageListHandler(httpd_req_t* req) {
+    // Returns JSON array of available pages for the web control panel.
+    auto* self = static_cast<ApTransferServer*>(req->user_ctx);
+    std::string json = (self && self->page_list_callback_) ? self->page_list_callback_()
+                                                           : "[]";
+    SendJson(req, json.c_str());
+    return ESP_OK;
+}
+
+esp_err_t ApTransferServer::ScreenshotSetHandler(httpd_req_t* req) {
+    // Board pipeline: accept a NAS-rendered 2bpp/1bpp image for the Screenshot
+    // page. Query: ?format=bwry2bpp&label=老黄历  Body: raw pixel bytes
+    // (30000 for 2bpp, 15000 for 1bpp, both 400x300).
+    auto* self = static_cast<ApTransferServer*>(req->user_ctx);
+    if (!self) {
+        SendJson(req, "{\"success\":false,\"error\":\"no_ctx\"}");
+        return ESP_FAIL;
+    }
+
+    char query[128] = {};
+    char format[16] = {};
+    char label[48] = {};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "format", format, sizeof(format));
+        httpd_query_key_value(query, "label", label, sizeof(label));
+    }
+    const bool is_2bpp = strcmp(format, "bwry2bpp") == 0 || strcmp(format, "2bpp") == 0;
+    const size_t expected_size = is_2bpp ? kImage2bppSize : kImage1bppSize;
+
+    if (req->content_len != expected_size) {
+        ESP_LOGW(kTag, "Screenshot wrong size: %u (need %u)",
+                 static_cast<unsigned>(req->content_len),
+                 static_cast<unsigned>(expected_size));
+        SendJson(req, is_2bpp
+            ? "{\"success\":false,\"error\":\"需要400x300 2bpp数据(30000字节)\"}"
+            : "{\"success\":false,\"error\":\"需要400x300 1bpp数据(15000字节)\"}");
+        return ESP_FAIL;
+    }
+
+    auto* buf = static_cast<uint8_t*>(malloc(expected_size));
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No memory");
+        return ESP_FAIL;
+    }
+
+    size_t received = 0;
+    while (received < expected_size) {
+        int n = httpd_req_recv(req, reinterpret_cast<char*>(buf + received),
+                               expected_size - received);
+        if (n <= 0) break;
+        received += n;
+    }
+    if (received != expected_size) {
+        free(buf);
+        SendJson(req, "{\"success\":false,\"error\":\"incomplete_body\"}");
+        return ESP_FAIL;
+    }
+
+    // URL-decode the label query value (httpd_query_key_value returns percent-
+    // encoded form; the NAS sends UTF-8 percent-encoded Chinese labels).
+    std::string label_str;
+    label_str.reserve(32);
+    for (const char* p = label; *p; ++p) {
+        if (*p == '%' && p[1] && p[2]) {
+            auto hex = [](char c) {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return 0;
+            };
+            label_str.push_back(static_cast<char>((hex(p[1]) << 4) | hex(p[2])));
+            p += 2;
+        } else if (*p == '+') {
+            label_str.push_back(' ');
+        } else {
+            label_str.push_back(*p);
+        }
+    }
+    if (label_str.empty()) label_str = "看板";
+
+    const bool ok = self->screenshot_callback_
+        ? self->screenshot_callback_(label_str, buf, received, 400, 300, is_2bpp)
+        : false;
+    free(buf);
+
+    SendJson(req, ok ? "{\"success\":true}" : "{\"success\":false,\"error\":\"no_callback\"}");
+    return ok ? ESP_OK : ESP_FAIL;
+}
+
 void ApTransferServer::NotifyState(ServerState state, const std::string& message) {
     ESP_LOGI(kTag, "State: %d, message: %s", state, message.c_str());
     if (state_callback_) {
@@ -940,6 +1077,18 @@ void ApTransferServer::SetPhotosChangedCallback(std::function<void()> callback) 
 
 void ApTransferServer::SetShowPhotoCallback(std::function<bool(const std::string&)> callback) {
     show_photo_callback_ = std::move(callback);
+}
+
+void ApTransferServer::SetSwitchPageCallback(std::function<bool(const std::string& page_id)> callback) {
+    switch_page_callback_ = std::move(callback);
+}
+
+void ApTransferServer::SetPageListCallback(std::function<std::string()> callback) {
+    page_list_callback_ = std::move(callback);
+}
+
+void ApTransferServer::SetScreenshotCallback(ScreenshotCallback callback) {
+    screenshot_callback_ = std::move(callback);
 }
 
 }  // namespace rawdraw
