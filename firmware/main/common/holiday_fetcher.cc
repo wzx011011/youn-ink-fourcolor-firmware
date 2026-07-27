@@ -15,6 +15,7 @@
 #include "holiday_fetcher.h"
 #include <esp_log.h>
 #include <esp_http_client.h>
+#include <esp_crt_bundle.h>
 #include <nvs_flash.h>
 #include <nvs.h>
 #include <cstring>
@@ -267,6 +268,7 @@ bool Fetch(int year) {
     config.event_handler = HttpEvent;
     config.timeout_ms = 10000;
     config.disable_auto_redirect = false;
+    config.crt_bundle_attach = esp_crt_bundle_attach;
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {

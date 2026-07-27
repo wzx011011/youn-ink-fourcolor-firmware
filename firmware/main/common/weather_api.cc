@@ -21,6 +21,7 @@
 #include <esp_log.h>
 #include <esp_http_client.h>
 #include <esp_timer.h>
+#include <esp_crt_bundle.h>
 #include <cJSON.h>
 #include <cstring>
 #include <cstdio>
@@ -284,6 +285,7 @@ static bool HttpGet(const char* url) {
     config.event_handler = HttpEventHandler;
     config.timeout_ms = 10000;
     config.disable_auto_redirect = false;
+    config.crt_bundle_attach = esp_crt_bundle_attach;
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {

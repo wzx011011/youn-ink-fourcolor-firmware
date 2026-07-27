@@ -41,6 +41,7 @@ public:
     void UpdateStatusBarForUi();
     void OnUpClick();
     void OnDownClick();
+    void OnUpDoubleClick();
     void OnUpLongPress();
     void OnDownLongPress();
     void OnWifiConfigComboLongPress();
@@ -62,6 +63,7 @@ private:
     void EnterManualSleep();
     void NoteButtonActivity();
     void EnterWifiConfigMode();
+    void StartOnlineDataServices();
 };
 
 #endif  // _APPLICATION_H_

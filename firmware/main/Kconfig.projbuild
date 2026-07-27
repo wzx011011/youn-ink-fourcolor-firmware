@@ -41,4 +41,30 @@ config ZECTRIX_EPD_4COLOR_BOOT_TEST_PATTERN
         Show black/white/red/yellow vertical bars once during display
         initialization so a newly connected 4-color panel can be verified.
 
+menu "Weather & holiday data"
+    depends on BOARD_TYPE_ZECTRIX_S3_EPAPER_4_2
+
+config QWEATHER_API_KEY
+    string "QWeather (HeWeather) API key"
+    default ""
+    help
+        和风天气 API Key。留空则天气页无数据,启动时会打 WARNING 日志。
+        去 https://dev.qweather.com 注册免费 Key(免费版每天 1000 次足够,
+        设备每小时刷新一次约 72 次/天)。Key 会编译进固件。
+
+config QWEATHER_DEFAULT_CITY
+    string "QWeather default city LocationID"
+    default "101210100"
+    help
+        默认城市 LocationID。例如 101210100=杭州,101010100=北京。
+        完整列表见 https://github.com/qwd/LocationList。
+
+config HOLIDAY_FETCH_ENABLED
+    bool "Fetch official Chinese holidays for calendar"
+    default y
+    help
+        启用后,日历页会在 WiFi 连接时自动从 timor.tech 抓取国务院节假日
+        数据并缓存到 NVS,标注"休"/"班"。该 API 免费公开,无需 Key。
+endmenu
+
 endmenu

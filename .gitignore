@@ -63,3 +63,8 @@ server/firmware/
 *.zip
 *.tar.gz
 *.pbm
+_research/
+.zcode/
+tools/almanac_preview.png
+tools/bing_wallpaper.jpg
+tools/convert_image.py

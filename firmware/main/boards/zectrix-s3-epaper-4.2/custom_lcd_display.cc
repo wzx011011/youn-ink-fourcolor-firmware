@@ -457,7 +457,11 @@ void CustomLcdDisplay::refresh_task_loop() {
     uint32_t stat_tiny_forced = 0;
     TickType_t last_stat_tick = 0;
 
-    const TickType_t kDebounceTicks = IsFourColorPanel() ? pdMS_TO_TICKS(3000) : pdMS_TO_TICKS(50);
+    // Debounce/merge window for non-urgent refreshes. Previously 3000ms for
+    // the 4-color panel, which made a single tap wait 3s before the refresh
+    // even started. 1000ms still merges rapid multi-taps but feels much more
+    // responsive for a single navigation click.
+    const TickType_t kDebounceTicks = IsFourColorPanel() ? pdMS_TO_TICKS(1000) : pdMS_TO_TICKS(50);
     const TickType_t kUrgentDebounceTicks = pdMS_TO_TICKS(30);
     const float kMinDiffBitRatio = 0.001f;  // 0.1%
     const float kForceFullDiffRatio = 0.30f;  // 30%

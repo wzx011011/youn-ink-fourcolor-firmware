@@ -433,6 +433,16 @@ private:
             }
         });
 
+        // UP double-click opens the Quick Switch overlay, the only user-facing
+        // entry point to hidden pages (weather / calendar / news / etc.).
+        // Previously this event was never wired, so the overlay was unreachable.
+        up_button_.OnDoubleClick([]() {
+            auto& app = Application::GetInstance();
+            if (app.GetRawDrawUiManager()) {
+                app.OnUpDoubleClick();
+            }
+        });
+
         down_button_.OnLongPress([]() {
             s_down_long_handled.store(true);
             s_down_suppress_click.store(true);

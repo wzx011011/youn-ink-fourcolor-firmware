@@ -4,6 +4,8 @@
 #include "boards/zectrix-s3-epaper-4.2/config.h"
 #include "board.h"
 #include "common/photo_storage.h"
+#include "common/weather_api.h"
+#include "common/holiday_fetcher.h"
 #include "display.h"
 #include "settings.h"
 #include "ui/rawdraw_ui_manager.h"
@@ -290,6 +292,7 @@ void Application::Initialize() {
                 ESP_LOGI(kTag, "WiFi connected: %s", data.c_str());
                 wifi_connected_.store(true, std::memory_order_release);
                 StartSntpClockSyncOnce();
+                StartOnlineDataServices();
                 if (rawdraw_ui_manager_ && !rawdraw_ui_manager_->IsLanHttpServerRunning()) {
                     const std::string ip = data.empty() ? WifiManager::GetInstance().GetIpAddress() : data;
                     if (!ip.empty()) {
@@ -379,6 +382,17 @@ void Application::OnDownClick() {
     }
 }
 
+void Application::OnUpDoubleClick() {
+    // Opens the Quick Switch overlay so the user can reach hidden pages
+    // (weather / calendar / news / ebook / etc.). Previously the board layer
+    // never wired OnDoubleClick, so this event was dead code.
+    ESP_LOGI(kTag, "UP double click");
+    if (rawdraw_ui_manager_) {
+        rawdraw_ui_manager_->HandleInput(
+            rawdraw::ButtonEvent{rawdraw::ButtonEvent::kUpDoubleClick});
+    }
+}
+
 void Application::OnUpLongPress() {
     ESP_LOGI(kTag, "UP long press");
     NoteButtonActivity();
@@ -449,6 +463,66 @@ void Application::EnterWifiConfigMode() {
                                                 wifi.GetApWebUrl());
     }
     UpdateStatusBarForUi();
+}
+
+void Application::StartOnlineDataServices() {
+    // Called once WiFi reaches the Connected state. Spawns a dedicated
+    // high-stack task to run the (blocking) network init: holiday_fetcher::Fetch
+    // and weather_api_init both do HTTP, which would overflow the small sys_evt
+    // task stack if run inline from the network event callback.
+    static std::atomic<bool> s_online_task_started{false};
+    if (s_online_task_started.exchange(true)) {
+        return;  // already launched (or running)
+    }
+    xTaskCreate([](void* arg) {
+        auto* self = static_cast<Application*>(arg);
+
+#if defined(CONFIG_HOLIDAY_FETCH_ENABLED) && CONFIG_HOLIDAY_FETCH_ENABLED
+        // Holiday data is free and key-less; safe to always init when enabled.
+        // Init() loads from NVS cache; if the cache is empty (first run) we
+        // fetch the current and next year from the API.
+        static bool s_holiday_done = false;
+        if (!s_holiday_done) {
+            const bool cached = holiday_fetcher::Init();
+            time_t now = 0;
+            time(&now);
+            struct tm tm_now = {};
+            localtime_r(&now, &tm_now);
+            const int year = (tm_now.tm_year > 0) ? (1900 + tm_now.tm_year) : 0;
+            ESP_LOGI(kTag, "Holiday fetcher init (year=%d, cached=%d)", year, cached ? 1 : 0);
+            if (year > 0) {
+                holiday_fetcher::Fetch(year);
+                holiday_fetcher::Fetch(year + 1);  // pre-warm next year for rollover
+            }
+            s_holiday_done = true;
+        }
+#endif
+
+        // Weather API: only init if a Key was configured at build time. Without
+        // a Key the weather page shows an empty state and logs a warning.
+        if (!weather_api_is_ready()) {
+#if defined(CONFIG_QWEATHER_API_KEY) && defined(CONFIG_QWEATHER_DEFAULT_CITY)
+            const char* key = CONFIG_QWEATHER_API_KEY;
+            const char* city = CONFIG_QWEATHER_DEFAULT_CITY;
+#else
+            const char* key = "";
+            const char* city = "";
+#endif
+            if (key != nullptr && key[0] != '\0' && city != nullptr && city[0] != '\0') {
+                ESP_LOGI(kTag, "Initializing QWeather (city=%s)", city);
+                weather_api_init(key, city, [self](const WeatherData& data) {
+                    // Invoked from weather_api's esp_timer task ~once per hour.
+                    if (self->GetRawDrawUiManager()) {
+                        self->GetRawDrawUiManager()->UpdateWeather(data);
+                    }
+                });
+            } else {
+                ESP_LOGW(kTag, "QWeather API key not configured; weather page will be empty. "
+                               "Set CONFIG_QWEATHER_API_KEY in menuconfig and rebuild.");
+            }
+        }
+        vTaskDelete(nullptr);  // task done, delete itself
+    }, "online_data", 8192, this, 5, nullptr);
 }
 
 void Application::ArmSyncSleepTimer() {
