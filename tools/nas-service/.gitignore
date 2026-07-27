@@ -1,0 +1,11 @@
+# 调试/临时产物
+debug_*.png
+font_test_*.png
+*_preview.png
+*_2x.png
+*.bin
+__pycache__/
+*.pyc
+data/
+*.png
+*.bin

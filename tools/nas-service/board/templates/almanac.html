@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  /* ===== 墨水屏铁律(实测总结) =====
+     1. 颜色只用纯 BWRY 四值,任何中间色抖动成噪点
+     2. 文字一律纯黑或纯白,绝不用彩色文字(彩色文字边缘锯齿严重)
+     3. 彩色(红/黄)只做背景色块/边框/分隔线
+     4. 字号优先大(大字锯齿不明显),小字最少 16px
+     参考:InkyPi 所有文字都用单色 textColor,彩色只用于 Chart.js 图表
+  */
+  :root {
+    --c-black: #000000;
+    --c-white: #ffffff;
+    --c-red:   #ff0000;
+    --c-yellow:#ffff00;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box;
+      -webkit-font-smoothing: none; font-smooth: never;
+      font-weight: 700; }
+
+  html, body {
+    width: 400px; height: 300px;
+    background: var(--c-white);
+    color: var(--c-black);  /* 全局文字纯黑 */
+    font-family: "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;
+    overflow: hidden;
+  }
+
+  .page {
+    width: 400px; height: 300px;
+    display: grid;
+    grid-template-rows: 56px 1fr;
+  }
+
+  /* ===== 顶部日期条 ===== */
+  .top {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 22px;
+    border-bottom: 4px solid var(--c-red);  /* 红色粗分隔线(色块,非文字) */
+  }
+  .top-left { font-size: 22px; color: var(--c-black); }
+  .top-right { text-align: right; font-size: 18px; color: var(--c-black); line-height: 1.2; }
+  .top-right .sub { font-size: 15px; }
+
+  /* ===== 主区:左焦点 + 右卡片 ===== */
+  .main {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+  }
+
+  /* 左:黄色焦点块 + 黑色大数字(不用红字,用黑字避免红字锯齿) */
+  .focal {
+    background: var(--c-yellow);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 10px;
+  }
+  .focal-month { font-size: 22px; color: var(--c-black); margin-bottom: 6px; }
+  .focal-day {
+    font-size: 64px; line-height: 0.95; color: var(--c-black);  /* 黑字,非红 */
+    letter-spacing: -1px;
+  }
+  .focal-animal { font-size: 16px; color: var(--c-black); margin-top: 8px; }
+
+  /* 右:宜/忌卡片 */
+  .cards { display: flex; flex-direction: column; gap: 10px; padding: 14px 18px; }
+  .card {
+    flex: 1;
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px;
+  }
+  .card.yi { border: 4px solid var(--c-black); }       /* 宜:黑框 */
+  .card.ji { border: 4px solid var(--c-red); }         /* 忌:红框(边框非文字) */
+  .card-label { font-size: 36px; line-height: 1; color: var(--c-black); flex-shrink: 0; }
+  .card-items { font-size: 17px; color: var(--c-black); line-height: 1.2; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="top">
+    <div class="top-left">{{ lunar_year_ganzhi }}年 {{ animal_year }}</div>
+    <div class="top-right">
+      <div>{{ solar_month }}.{{ solar_day }} 周{{ weekday_cn }}</div>
+      <div class="sub">{{ lunar_month_cn }}月{{ lunar_day_cn }}{% if jieqi %} · {{ jieqi }}{% endif %}</div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="focal">
+      <div class="focal-month">{{ lunar_month_cn }}月</div>
+      <div class="focal-day">{{ lunar_day_cn }}</div>
+      <div class="focal-animal">{{ day_ganzhi }}日</div>
+    </div>
+    <div class="cards">
+      <div class="card yi">
+        <span class="card-label">宜</span>
+        <span class="card-items">{{ yi[:2]|join(' ') }}</span>
+      </div>
+      <div class="card ji">
+        <span class="card-label">忌</span>
+        <span class="card-items">{{ ji[:2]|join(' ') }}</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

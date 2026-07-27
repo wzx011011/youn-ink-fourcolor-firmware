@@ -1,0 +1,26 @@
+# 墨水屏图片转换 + 看板渲染 + 推送服务
+# 部署: cd /volume1/docker/eink-photo && docker compose up -d --build
+# 访问: http://<NAS-IP>:8848
+
+services:
+  eink-photo:
+    build: .
+    container_name: eink-photo
+    restart: unless-stopped
+    ports:
+      - "8848:8096"             # 外部 8848 -> 容器内 8096(Dockerfile EXPOSE)
+    volumes:
+      - ./data:/data            # 转换历史 + 看板缓存 + 配置持久化
+      - ./board:/app/board      # 看板代码(改 .py 后 restart 即生效,不用重建镜像)
+      - ./templates:/app/templates  # 网页模板
+      - ./app.py:/app/app.py    # 主程序(改后 restart 即生效)
+    environment:
+      - DEVICE_IP=192.168.100.75  # 墨水屏设备 IP(设备换网络后改这里)
+      - DEVICE_PORT=80            # 设备 HTTP 端口
+      - HISTORY_DIR=/data/uploads
+      - TZ=Asia/Shanghai
+      - PYTHONDONTWRITEBYTECODE=1  # 禁止生成 .pyc,避免改代码后缓存旧版
+      # Playwright Chromium 下载加速(国内)
+      - PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
+    # 看板渲染需要较多内存(Chromium ~400MB),确保 NAS 内存够
+    mem_limit: 2g

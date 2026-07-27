@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#1a1a1a">
+<title>{{ board_label }} - 看板详情</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    background: #1a1a1a; color: #ddd; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding: 12px; padding-bottom: 50px; font-size: 14px; min-height: 100vh;
+  }
+  /* 顶部导航 */
+  .nav { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .back { color: #4a9eff; text-decoration: none; font-size: 20px; padding: 4px 8px; }
+  .nav h1 { font-size: 18px; font-weight: 600; color: #fff; }
+  /* 模板卡片网格 */
+  .tpl-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 16px; }
+  .tpl-card {
+    background: #2a2a2a; border: 2px solid #3a3a3a; border-radius: 12px;
+    padding: 10px; cursor: pointer; transition: all .15s; position: relative;
+  }
+  .tpl-card:active { transform: scale(0.97); }
+  .tpl-card.selected { border-color: #4a9eff; background: #1a2a3a; }
+  .tpl-card .tpl-name { font-size: 14px; color: #ddd; text-align: center; margin-top: 6px; }
+  .tpl-card.selected .tpl-name { color: #4a9eff; font-weight: 600; }
+  .tpl-card .tpl-thumb {
+    width: 100%; aspect-ratio: 4/3; background: #eee; border-radius: 6px;
+    image-rendering: pixelated; object-fit: contain;
+  }
+  /* 大预览区 */
+  .preview-section { margin-bottom: 16px; }
+  .preview-section .label { font-size: 12px; color: #888; margin-bottom: 6px; }
+  .preview-box {
+    background: #fff; border-radius: 8px; padding: 6px;
+    display: flex; justify-content: center;
+  }
+  .preview-box img { width: 100%; max-width: 380px; image-rendering: pixelated; }
+  /* 操作按钮 */
+  .actions { display: flex; gap: 8px; }
+  .btn {
+    flex: 1; padding: 14px; border: none; border-radius: 10px; font-size: 15px;
+    font-weight: 600; cursor: pointer; color: #fff;
+  }
+  .btn-primary { background: #4a9eff; }
+  .btn-secondary { background: #3a3a3a; }
+  .btn:active { transform: scale(0.98); }
+  .btn:disabled { opacity: 0.5; }
+  /* 状态栏 */
+  .status {
+    position: fixed; bottom: 0; left: 0; right: 0; background: #2a2a2a;
+    padding: 10px 16px; font-size: 12px; color: #888; text-align: center;
+    border-top: 1px solid #3a3a3a; z-index: 100;
+  }
+  .status.success { color: #34c759; }
+  .status.error { color: #ff6b6b; }
+  .spinner {
+    display: inline-block; width: 12px; height: 12px; border: 2px solid #555;
+    border-top-color: #4a9eff; border-radius: 50%; animation: spin .8s linear infinite;
+    vertical-align: middle; margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .option-row {
+    font-size: 12px; color: #888; margin: 10px 0; display: flex; align-items: center; gap: 6px;
+  }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <a href="/" class="back">‹</a>
+  <h1 id="title">加载中...</h1>
+</div>
+
+<!-- 模板卡片网格 -->
+<div class="tpl-grid" id="tplGrid">
+  <div style="grid-column: span 2; color: #666; text-align: center; padding: 30px;">
+    加载模板列表...
+  </div>
+</div>
+
+<!-- 大预览区 -->
+<div class="preview-section">
+  <div class="label">📱 设备预览(400×300 四色抖动后)</div>
+  <div class="preview-box">
+    <img id="preview" alt="预览" style="display:none">
+    <div id="previewPlaceholder" style="color:#999; padding:60px 20px; text-align:center; font-size:13px;">
+      选择上方模板生成预览
+    </div>
+  </div>
+</div>
+
+<!-- 操作按钮 -->
+<div class="option-row">
+  <input type="checkbox" id="autoSwitch" checked>
+  <label for="autoSwitch">推送后自动切到设备「看板」页</label>
+</div>
+<div class="actions">
+  <button class="btn btn-secondary" onclick="refreshPreview()">🔄 刷新预览</button>
+  <button class="btn btn-primary" id="pushBtn" onclick="pushToDevice()" disabled>📤 推送到设备</button>
+</div>
+
+<div class="status" id="status">就绪</div>
+
+<script>
+const BOARD_ID = "{{ board }}";
+const $ = id => document.getElementById(id);
+let templates = [];
+let currentTemplate = '';
+
+function setStatus(msg, type) {
+  $('status').className = 'status' + (type ? ' ' + type : '');
+  $('status').innerHTML = msg;
+}
+function setSpinner(msg) { setStatus('<span class="spinner"></span>' + msg); }
+
+async function init() {
+  // 拉取看板 + 模板列表
+  try {
+    const r = await fetch('/api/board/list');
+    const data = await r.json();
+    const board = (data.boards || []).find(b => b.id === BOARD_ID);
+    if (!board) {
+      $('title').textContent = '未知看板: ' + BOARD_ID;
+      $('tplGrid').innerHTML = '<div style="grid-column:span 2;color:#ff6b6b;text-align:center;padding:30px;">看板不存在</div>';
+      return;
+    }
+    $('title').textContent = board.label;
+    templates = board.templates || [];
+    renderTemplates();
+    // 自动选第一个模板并预览
+    if (templates.length > 0) {
+      selectTemplate(templates[0].id);
+    }
+  } catch (e) {
+    setStatus('加载失败: ' + e.message, 'error');
+  }
+}
+
+function renderTemplates() {
+  if (templates.length === 0) {
+    $('tplGrid').innerHTML = '<div style="grid-column:span 2;color:#666;text-align:center;padding:30px;">该看板暂无模板</div>';
+    return;
+  }
+  $('tplGrid').innerHTML = templates.map(t => `
+    <div class="tpl-card ${t.id===currentTemplate?'selected':''}" data-id="${t.id}" onclick="selectTemplate('${t.id}')">
+      <img class="tpl-thumb" id="thumb_${t.id}" alt="${t.label}" style="display:none">
+      <div class="tpl-name">${t.label}</div>
+    </div>`).join('');
+  // 异步加载每个模板的缩略图
+  templates.forEach(t => loadThumb(t.id));
+}
+
+async function loadThumb(tplId) {
+  try {
+    const url = `/api/board/preview?board=${BOARD_ID}&template=${tplId}&_t=${Date.now()}`;
+    const r = await fetch(url);
+    if (r.ok) {
+      const blob = await r.blob();
+      const img = $('thumb_' + tplId);
+      if (img) {
+        img.src = URL.createObjectURL(blob);
+        img.style.display = 'block';
+      }
+    }
+  } catch (e) { /* 缩略图失败不阻塞 */ }
+}
+
+function selectTemplate(tplId) {
+  currentTemplate = tplId;
+  // 更新卡片高亮
+  document.querySelectorAll('.tpl-card').forEach(c => {
+    c.classList.toggle('selected', c.dataset.id === tplId);
+  });
+  $('pushBtn').disabled = false;
+  refreshPreview();
+}
+
+async function refreshPreview() {
+  if (!currentTemplate) return;
+  setSpinner('生成预览中...');
+  $('preview').style.display = 'none';
+  $('previewPlaceholder').style.display = 'block';
+  $('previewPlaceholder').textContent = '生成中...';
+  try {
+    const url = `/api/board/preview?board=${BOARD_ID}&template=${currentTemplate}&_t=${Date.now()}`;
+    const r = await fetch(url);
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${r.status}`);
+    }
+    const blob = await r.blob();
+    $('preview').src = URL.createObjectURL(blob);
+    $('preview').style.display = 'block';
+    $('previewPlaceholder').style.display = 'none';
+    setStatus('✓ 预览已生成', 'success');
+  } catch (e) {
+    $('previewPlaceholder').textContent = '生成失败: ' + e.message;
+    setStatus('预览失败: ' + e.message, 'error');
+  }
+}
+
+async function pushToDevice() {
+  if (!currentTemplate) return;
+  const autoSwitch = $('autoSwitch').checked;
+  setSpinner('推送到设备中...');
+  try {
+    const r = await fetch('/api/board/render', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        board: BOARD_ID, template: currentTemplate,
+        push: true, auto_switch: autoSwitch
+      })
+    });
+    const data = await r.json();
+    if (data.ok) {
+      setStatus(`✓ 已推送到设备${autoSwitch ? ' 并切到看板页' : ''}`, 'success');
+    } else {
+      throw new Error(data.error || '推送失败');
+    }
+  } catch (e) {
+    setStatus('推送失败: ' + e.message, 'error');
+  }
+}
+
+init();
+</script>
+</body>
+</html>

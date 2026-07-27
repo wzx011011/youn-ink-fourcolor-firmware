@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#1a1a1a">
+<title>墨水屏 · {{ device_ip }}</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+body {
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #1a1a1a; color: #eee; min-height: 100vh;
+  padding: 12px; padding-bottom: 50px;
+}
+h1 { font-size: 18px; text-align: center; margin-bottom: 2px; }
+.sub { text-align: center; color: #888; font-size: 12px; margin-bottom: 14px; }
+
+/* Tab 切换 */
+.tabs { display: flex; gap: 4px; margin-bottom: 14px; background: #2a2a2a; border-radius: 10px; padding: 4px; }
+.tab {
+  flex: 1; padding: 10px; text-align: center; cursor: pointer; border-radius: 8px;
+  font-size: 14px; color: #aaa; transition: all .15s;
+}
+.tab.active { background: #4a9eff; color: #fff; }
+.panel { display: none; }
+.panel.active { display: block; }
+
+/* 设备状态徽章 */
+.device-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  background: #2a2a2a; padding: 10px 14px; border-radius: 10px; margin-bottom: 14px;
+  font-size: 13px;
+}
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+.dot.online { background: #34c759; } .dot.offline { background: #ff6b6b; }
+.dot.warn { background: #ffa500; }
+
+/* 功能面板(遥控器)*/
+.page-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
+.page-btn {
+  background: #2a2a2a; border: 2px solid #3a3a3a; border-radius: 12px;
+  padding: 18px 6px; text-align: center; cursor: pointer; transition: all .15s;
+}
+.page-btn:active { transform: scale(0.96); }
+.page-btn .icon { font-size: 28px; display: block; margin-bottom: 6px; }
+.page-btn .name { font-size: 13px; color: #ddd; }
+.page-btn.active { border-color: #4a9eff; background: #1a2a3a; }
+.page-btn.active .name { color: #4a9eff; font-weight: 600; }
+.page-btn .badge {
+  position: absolute; top: 6px; right: 8px;
+  font-size: 10px; color: #4a9eff; background: rgba(74,158,255,0.15);
+  padding: 2px 6px; border-radius: 8px;
+}
+.page-btn { position: relative; }
+
+/* 预览区(传图用)*/
+.preview-wrap {
+  background: #000; border: 2px dashed #444; border-radius: 12px;
+  aspect-ratio: 4/3; display: flex; align-items: center; justify-content: center;
+  overflow: hidden; position: relative; margin-bottom: 12px;
+  background-image: linear-gradient(45deg, #2a2a2a 25%, transparent 25%), linear-gradient(-45deg, #2a2a2a 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #2a2a2a 75%), linear-gradient(-45deg, transparent 75%, #2a2a2a 75%);
+  background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+}
+.preview-wrap img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.preview-wrap .hint { color: #666; font-size: 13px; text-align: center; padding: 20px; }
+
+/* 按钮 */
+.btn-row { display: flex; gap: 8px; margin-bottom: 12px; }
+.btn {
+  flex: 1; padding: 14px; border: none; border-radius: 10px;
+  font-size: 15px; font-weight: 600; cursor: pointer; transition: opacity .15s;
+}
+.btn:active { opacity: 0.7; }
+.btn-primary { background: #4a9eff; color: #fff; }
+.btn-success { background: #34c759; color: #fff; }
+.btn-secondary { background: #3a3a3a; color: #eee; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* 参数/设置面板 */
+.params, .settings-box { background: #2a2a2a; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+.params summary, .settings-box h3 { cursor: pointer; font-size: 14px; color: #aaa; user-select: none; margin-bottom: 4px; }
+.param { margin-top: 12px; }
+.param label, .settings-box label { display: flex; justify-content: space-between; font-size: 12px; color: #bbb; margin-bottom: 4px; }
+.param label span { color: #4a9eff; }
+.param input[type=range] { width: 100%; accent-color: #4a9eff; }
+select, input[type=text], input[type=number] {
+  width: 100%; padding: 10px; background: #1a1a1a; color: #eee;
+  border: 1px solid #444; border-radius: 8px; font-size: 14px;
+}
+.format-row { display: flex; gap: 8px; margin-top: 8px; }
+.format-row label {
+  flex: 1; padding: 10px; text-align: center; background: #1a1a1a;
+  border: 2px solid #444; border-radius: 8px; font-size: 13px; cursor: pointer;
+}
+.format-row input { display: none; }
+.format-row label:has(input:checked) { border-color: #4a9eff; background: #1a2a3a; color: #4a9eff; }
+
+.field { margin-top: 12px; }
+.field label { display: block; font-size: 12px; color: #aaa; margin-bottom: 4px; }
+
+/* 状态条 */
+.status {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  background: #000; color: #aaa; padding: 10px 14px; font-size: 12px;
+  border-top: 1px solid #333; min-height: 40px; display: flex; align-items: center;
+}
+.status.error { color: #ff6b6b; }
+.status.success { color: #34c759; }
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #555;
+  border-top-color: #4a9eff; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 6px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+input[type=file] { display: none; }
+.preset-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.preset-btn { flex: none; padding: 6px 10px; font-size: 11px; background: #3a3a3a; color: #ddd; border: none; border-radius: 6px; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<h1>🖼️ 墨水屏遥控器</h1>
+<div class="sub">{{ device_ip }} · 高质量 gamut 抖动</div>
+
+<div class="device-bar" id="deviceBar">
+  <span><span class="dot offline" id="dot"></span><span id="devStatus">检测设备中...</span></span>
+  <button class="preset-btn" onclick="checkDevice()">🔄 刷新</button>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="control">🎛️ 遥控</div>
+  <div class="tab" data-tab="photo">📷 传图</div>
+  <div class="tab" data-tab="settings">⚙️ 设置</div>
+</div>
+
+<!-- ============ Tab 1: 遥控 ============ -->
+<div class="panel active" id="panel-control">
+  <div class="page-grid" id="pageGrid">
+    <div style="grid-column:span 3;color:#666;text-align:center;padding:30px;font-size:13px">
+      正在检测设备是否支持页面控制...<br><br>
+      如长时间无响应,请确认设备已升级固件,或在"设置"里检查设备 IP。
+    </div>
+  </div>
+  <div style="font-size:11px;color:#666;text-align:center;margin-top:8px">
+    点按钮即切换设备屏幕显示。绿色边框 = 设备当前页面。
+  </div>
+</div>
+
+<!-- ============ Tab 2: 传图 ============ -->
+<div class="panel" id="panel-photo">
+  <div class="preview-wrap" id="previewWrap">
+    <div class="hint" id="hint">📁 点击或拖入图片 / 拍照<br><br>💡 <a href="#" id="bingBtn" style="color:#4a9eff">抓取 Bing 每日壁纸</a></div>
+    <img id="preview" style="display:none">
+  </div>
+  <div class="btn-row">
+    <button class="btn btn-secondary" onclick="document.getElementById('file').click()">选图</button>
+    <button class="btn btn-primary" id="convertBtn" onclick="doConvert()" disabled>转换</button>
+    <button class="btn btn-success" id="pushBtn" onclick="doPush()" disabled>推送</button>
+  </div>
+  <details class="params">
+    <summary>⚙️ 调参数(可选)</summary>
+    <div class="format-row" style="margin-top:12px">
+      <label><input type="radio" name="fmt" value="bwry2bpp" checked><span>🎨 四色 BWRY</span></label>
+      <label><input type="radio" name="fmt" value="1bpp"><span>⚫️ 黑白 1bpp</span></label>
+    </div>
+    <div class="param"><label>抖动算法 <select id="dither" onchange="autoConvert()">
+      <option value="fs">Floyd-Steinberg(推荐)</option>
+      <option value="burkes">Burkes(略锐)</option>
+      <option value="stucki">Stucki(细腻)</option>
+      <option value="jarvis">Jarvis(最细腻)</option>
+      <option value="atkinson">Atkinson(复古)</option>
+      <option value="ordered">有序(规则点)</option>
+    </select></label></div>
+    <div class="param"><label>色域压缩 gamut <span id="gamutV">0.70</span></label>
+      <input type="range" id="gamut" min="0" max="1" step="0.05" value="0.7" oninput="document.getElementById('gamutV').textContent=this.value"></div>
+    <div class="param"><label>饱和度 <span id="satV">1.30</span></label>
+      <input type="range" id="sat" min="0" max="2" step="0.05" value="1.3" oninput="document.getElementById('satV').textContent=this.value"></div>
+    <div class="param"><label>曝光 <span id="expV">1.10</span></label>
+      <input type="range" id="exp" min="0.5" max="2" step="0.05" value="1.1" oninput="document.getElementById('expV').textContent=this.value"></div>
+    <div class="param"><label>暗部提亮 shadows <span id="shadV">0.00</span></label>
+      <input type="range" id="shad" min="-1" max="1" step="0.05" value="0" oninput="document.getElementById('shadV').textContent=this.value"></div>
+    <div class="param"><label>背景 <select id="bg"><option value="black" selected>黑底</option><option value="white">白底</option></select></label></div>
+    <div class="preset-row">
+      <button class="preset-btn" onclick="setPreset('photo')">📷 照片</button>
+      <button class="preset-btn" onclick="setPreset('text')">📝 文字</button>
+      <button class="preset-btn" onclick="setPreset('poster')">🎨 海报</button>
+    </div>
+  </details>
+  <input type="file" id="file" accept="image/*">
+</div>
+
+<!-- ============ Tab 3: 设置 ============ -->
+<div class="panel" id="panel-settings">
+  <div class="settings-box">
+    <h3>🔌 设备连接</h3>
+    <div class="field"><label>设备 IP</label>
+      <input type="text" id="cfgDeviceIp" placeholder="192.168.100.75"></div>
+    <div class="field"><label>设备端口</label>
+      <input type="text" id="cfgDevicePort" placeholder="80" value="80"></div>
+    <button class="btn btn-primary" style="margin-top:12px" onclick="saveConfig()">💾 保存</button>
+    <div style="font-size:11px;color:#666;margin-top:8px">
+      设备换了网络(如带到公司)后,在此填新 IP。点保存后,遥控和传图都会指向新设备。
+    </div>
+  </div>
+  <div class="settings-box">
+    <h3>⏰ 定时推送</h3>
+    <div style="font-size:12px;color:#666;margin-bottom:10px">
+      勾选的看板会按设定频率自动推送到设备。⭐ 股市默认智能模式(仅交易时段)。
+    </div>
+    <div id="scheduleList" style="display:flex;flex-direction:column;gap:10px">
+      <div style="color:#666;font-size:13px">加载中...</div>
+    </div>
+    <button class="btn btn-primary" style="margin-top:12px" onclick="saveSchedule()">💾 保存定时</button>
+  </div>
+  <div class="settings-box">
+    <h3>ℹ️ 关于</h3>
+    <div style="font-size:12px;color:#888;line-height:1.6">
+      墨水屏图片转换服务(基于 epaper-dithering)。<br>
+      遥控功能需设备固件支持 <code>/page/show</code> 接口。<br>
+      转换在 NAS 本地完成,推送给设备显示。
+    </div>
+  </div>
+</div>
+
+<div class="status" id="status">就绪</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let currentFile = null, currentRawB64 = null, currentFmt = 'bwry2bpp', convertTimer = null;
+let pages = [], currentPageId = '';
+
+function setStatus(msg, type) {
+  $('status').className = 'status' + (type ? ' ' + type : '');
+  $('status').innerHTML = msg;
+}
+function setSpinner(msg) { setStatus('<span class="spinner"></span>' + msg); }
+
+// Tab 切换
+document.querySelectorAll('.tab').forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    $('panel-' + t.dataset.tab).classList.add('active');
+    if (t.dataset.tab === 'control') checkDevice();
+    if (t.dataset.tab === 'settings') { loadConfig(); loadSchedule(); }
+  };
+});
+
+// ============ 设备检测 + 遥控 ============
+async function checkDevice() {
+  $('devStatus').textContent = '检测设备...';
+  $('dot').className = 'dot warn';
+  try {
+    const r = await fetch('/api/device/status');
+    const j = await r.json();
+    if (!j.reachable) {
+      $('dot').className = 'dot offline';
+      $('devStatus').textContent = `设备 ${j.device} 不可达`;
+      $('pageGrid').innerHTML = '<div style="grid-column:span 3;color:#666;text-align:center;padding:30px;font-size:13px">设备连不上。<br>请确认设备已开机并连上 WiFi,在"设置"里检查 IP。</div>';
+      setStatus(`设备 ${j.device} 不可达`, 'error');
+      return;
+    }
+    $('dot').className = 'dot online';
+    $('devStatus').textContent = `设备 ${j.device} 在线`;
+    pages = j.pages || [];
+    if (!j.page_control || pages.length === 0) {
+      $('pageGrid').innerHTML = '<div style="grid-column:span 3;color:#ffa500;text-align:center;padding:30px;font-size:13px">⚠️ 设备在线,但固件不支持页面控制。<br><br>需要升级固件(含 /page/show 接口)才能用遥控。<br><br>传图功能可正常使用。</div>';
+      setStatus('设备在线但不支持遥控,请升级固件', 'error');
+      return;
+    }
+    renderPages();
+    setStatus(`设备在线,支持 ${pages.length} 个页面控制`, 'success');
+  } catch (e) {
+    $('dot').className = 'dot offline';
+    $('devStatus').textContent = '检测失败';
+    setStatus('检测失败: ' + e.message, 'error');
+  }
+}
+
+function renderPages() {
+  const icons = {gallery:'🖼️',weather:'🌤️',calendar:'📅',news:'📰',ebook:'📖',lifebar:'⏳',yearprogress:'📊',almanac:'📜',screenshot:'📊',log:'📋',settings:'⚙️'};
+  $('pageGrid').innerHTML = pages.map(p => {
+    const icon = icons[p.id]||'📄';
+    // board 型页面:显示"详情"角标,点击跳详情页选模板
+    // raw 型页面:点击直接切设备页(原有行为)
+    if (p.type === 'board' && p.board_id) {
+      return `
+        <div class="page-btn ${p.active?'active':''}" data-id="${p.id}" onclick="location.href='/detail?board=${p.board_id}'">
+          <span class="icon">${icon}</span>
+          <span class="name">${p.name}</span>
+          <span class="badge">详情 ›</span>
+        </div>`;
+    }
+    return `
+      <div class="page-btn ${p.active?'active':''}" data-id="${p.id}" onclick="switchPage('${p.id}')">
+        <span class="icon">${icon}</span>
+        <span class="name">${p.name}</span>
+      </div>`;
+  }).join('');
+}
+
+async function switchPage(id) {
+  setSpinner('切换到 ' + id + '...');
+  try {
+    const r = await fetch('/api/device/switch_page', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({page: id})
+    });
+    const j = await r.json();
+    if (j.ok) {
+      // 标记当前页
+      pages.forEach(p => p.active = (p.id === id));
+      renderPages();
+      setStatus('✓ 已切换到 ' + id, 'success');
+    } else {
+      setStatus('切换失败: ' + (j.message || j.error || ''), 'error');
+    }
+  } catch (e) {
+    setStatus('切换失败: ' + e.message, 'error');
+  }
+}
+
+// ============ 传图 ============
+$('file').onchange = e => { if (e.target.files[0]) loadFile(e.target.files[0]); };
+function loadFile(f) {
+  currentFile = f; currentRawB64 = null;
+  $('pushBtn').disabled = true; $('convertBtn').disabled = false;
+  $('hint').style.display = 'none';
+  const reader = new FileReader();
+  reader.onload = e => { $('preview').src = e.target.result; $('preview').style.display = 'block'; };
+  reader.readAsDataURL(f);
+  setStatus(`已选: ${f.name} (${(f.size/1024).toFixed(0)}KB)`);
+  doConvert();
+}
+const dropZone = $('previewWrap');
+dropZone.addEventListener('dragover', e => e.preventDefault());
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0];
+  if (f && f.type.startsWith('image/')) loadFile(f);
+});
+$('bingBtn').onclick = async e => {
+  e.preventDefault(); setSpinner('抓取 Bing 壁纸...');
+  try {
+    const r = await fetch('/api/bing'); const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    const bytes = atob(j.image_b64.split(',')[1]);
+    const arr = new Uint8Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+    currentFile = new File([arr], j.name || 'bing.jpg', {type: 'image/jpeg'});
+    $('hint').style.display = 'none';
+    $('preview').src = j.image_b64; $('preview').style.display = 'block';
+    $('convertBtn').disabled = false;
+    setStatus('Bing: ' + (j.copyright||''));
+    doConvert();
+  } catch (err) { setStatus('抓取失败: ' + err.message, 'error'); }
+};
+
+async function doConvert() {
+  if (!currentFile) return;
+  setSpinner('转换中...');
+  const fd = new FormData();
+  fd.append('image', currentFile);
+  fd.append('format', document.querySelector('input[name=fmt]:checked').value);
+  fd.append('dither', $('dither').value);
+  ['gamut','sat','exp','shad'].forEach(k => fd.append(k === 'sat' ? 'saturation' : (k === 'exp' ? 'exposure' : (k === 'shad' ? 'shadows' : k)), $(k).value));
+  fd.append('bg', $('bg').value);
+  try {
+    const r = await fetch('/api/convert', {method: 'POST', body: fd});
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    currentRawB64 = j.raw_b64; currentFmt = j.format;
+    $('preview').src = j.preview; $('pushBtn').disabled = false;
+    setStatus(`转换完成 ${j.size} 字节`, 'success');
+  } catch (err) { setStatus('转换失败: ' + err.message, 'error'); }
+}
+function autoConvert() {
+  if (!currentFile) return;
+  clearTimeout(convertTimer); convertTimer = setTimeout(doConvert, 300);
+}
+async function doPush() {
+  if (!currentRawB64) return;
+  setSpinner('推送到设备...');
+  try {
+    const r = await fetch('/api/push', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({raw_b64: currentRawB64, format: currentFmt})
+    });
+    const j = await r.json();
+    setStatus(j.ok ? '✓ 已推送到 ' + j.device : '推送失败: ' + j.message, j.ok ? 'success' : 'error');
+  } catch (e) { setStatus('推送失败: ' + e.message, 'error'); }
+}
+function setPreset(name) {
+  const presets = {
+    photo:  {gamut:0.7, sat:1.3, exp:1.1, shad:0.1, dither:'fs'},
+    text:   {gamut:0.3, sat:1.0, exp:1.0, shad:0,   dither:'atkinson'},
+    poster: {gamut:0.8, sat:1.5, exp:1.1, shad:0,   dither:'fs'},
+  };
+  const p = presets[name];
+  $('gamut').value=p.gamut; $('gamutV').textContent=p.gamut.toFixed(2);
+  $('sat').value=p.sat; $('satV').textContent=p.sat.toFixed(2);
+  $('exp').value=p.exp; $('expV').textContent=p.exp.toFixed(2);
+  $('shad').value=p.shad; $('shadV').textContent=p.shad.toFixed(2);
+  $('dither').value=p.dither;
+  autoConvert();
+}
+
+// ============ 设置 ============
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/config'); const j = await r.json();
+    $('cfgDeviceIp').value = j.device_ip || '';
+    $('cfgDevicePort').value = j.device_port || '80';
+  } catch (e) {}
+}
+async function saveConfig() {
+  const ip = $('cfgDeviceIp').value.trim();
+  const port = $('cfgDevicePort').value.trim() || '80';
+  if (!ip) { setStatus('请填设备 IP', 'error'); return; }
+  setSpinner('保存中...');
+  try {
+    await fetch('/api/config', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({device_ip: ip, device_port: port})
+    });
+    setStatus('✓ 已保存,新的设备 IP 生效', 'success');
+    checkDevice();
+  } catch (e) { setStatus('保存失败: ' + e.message, 'error'); }
+}
+
+// ===== 定时推送配置 =====
+let scheduleData = {};
+
+async function loadSchedule() {
+  try {
+    const r = await fetch('/api/schedule');
+    const data = await r.json();
+    scheduleData = data.schedules || {};
+    renderScheduleList();
+  } catch (e) {
+    $('scheduleList').innerHTML = '<div style="color:#ff6b6b;font-size:13px">加载失败: ' + e.message + '</div>';
+  }
+}
+
+function renderScheduleList() {
+  const items = Object.entries(scheduleData);
+  if (!items.length) {
+    $('scheduleList').innerHTML = '<div style="color:#666;font-size:13px">暂无可配置看板</div>';
+    return;
+  }
+  const intervals = [
+    {v: 5, t: '5 分钟'}, {v: 10, t: '10 分钟'}, {v: 30, t: '30 分钟'},
+    {v: 60, t: '1 小时'}, {v: 120, t: '2 小时'}, {v: 360, t: '6 小时'},
+    {v: 720, t: '12 小时'},
+  ];
+  $('scheduleList').innerHTML = items.map(([bid, cfg]) => {
+    const tplOpts = (cfg.templates || []).map(t =>
+      `<option value="${t.id}" ${t.id===cfg.template?'selected':''}>${t.label}</option>`).join('');
+    const intOpts = intervals.map(i =>
+      `<option value="${i.v}" ${i.v===cfg.interval_min?'selected':''}>${i.t}</option>`).join('');
+    const smartTag = cfg.smart ? ' <span style="color:#ffa500;font-size:11px">⭐ 仅交易时段</span>' : '';
+    return `
+      <div style="background:#2a2a2a;border-radius:8px;padding:10px 12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <span style="font-size:14px;color:#ddd">${cfg.label}${smartTag}</span>
+          <label style="font-size:13px;color:#888;cursor:pointer">
+            <input type="checkbox" data-bid="${bid}" data-field="enabled" ${cfg.enabled?'checked':''} onchange="onScheduleChange('${bid}')"> 启用
+          </label>
+        </div>
+        <div style="display:flex;gap:8px;font-size:12px">
+          <select data-bid="${bid}" data-field="template" onchange="onScheduleChange('${bid}')" style="flex:1;background:#1a1a1a;color:#ddd;border:1px solid #3a3a3a;border-radius:6px;padding:6px">
+            ${tplOpts}
+          </select>
+          <select data-bid="${bid}" data-field="interval_min" onchange="onScheduleChange('${bid}')" style="flex:1;background:#1a1a1a;color:#ddd;border:1px solid #3a3a3a;border-radius:6px;padding:6px">
+            ${intOpts}
+          </select>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function onScheduleChange(bid) {
+  // Read current DOM values into scheduleData (live update, no save yet)
+  document.querySelectorAll(`[data-bid="${bid}"]`).forEach(el => {
+    const field = el.dataset.field;
+    if (field === 'enabled') {
+      scheduleData[bid][field] = el.checked;
+    } else {
+      scheduleData[bid][field] = field === 'interval_min' ? parseInt(el.value) : el.value;
+    }
+  });
+}
+
+async function saveSchedule() {
+  setSpinner('保存定时配置...');
+  let ok = 0, fail = 0;
+  for (const [bid, cfg] of Object.entries(scheduleData)) {
+    try {
+      const r = await fetch('/api/schedule', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          board: bid, enabled: cfg.enabled, template: cfg.template,
+          interval_min: cfg.interval_min, smart: cfg.smart || false
+        })
+      });
+      const d = await r.json();
+      if (d.ok) ok++; else fail++;
+    } catch (e) { fail++; }
+  }
+  if (fail === 0) {
+    setStatus(`✓ 已保存 ${ok} 个看板的定时配置`, 'success');
+  } else {
+    setStatus(`保存完成(${ok}成功/${fail}失败)`, 'error');
+  }
+}
+
+// 启动时检测设备
+checkDevice();
+</script>
+</body>
+</html>
