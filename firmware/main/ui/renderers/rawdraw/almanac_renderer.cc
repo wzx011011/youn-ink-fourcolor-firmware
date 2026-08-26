@@ -347,6 +347,24 @@ bool AlmanacRenderer::HandleInput(const ButtonEvent& event) {
                 month_++;
                 if (month_ > 12) { month_ = 1; year_++; }
             }
+            // Clamp day to the navigated month's length (31 → Apr → 30),
+            // then recompute the weekday for that date. Otherwise the
+            // header keeps showing today's weekday and lunar conversion
+            // receives an invalid day.
+            {
+                static const int kDim[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+                int maxd = kDim[month_ - 1];
+                if (month_ == 2 && ((year_%4==0 && year_%100!=0) || year_%400==0))
+                    maxd = 29;
+                if (day_ > maxd) day_ = maxd;
+
+                struct tm nav{};
+                nav.tm_year = year_ - 1900;
+                nav.tm_mon = month_ - 1;
+                nav.tm_mday = day_;
+                if (mktime(&nav) != (time_t)-1)
+                    weekday_ = nav.tm_wday;
+            }
             lunar_ = Calendar::ToLunarDate(year_, month_, day_);
             solar_term_ = GetSolarTerm(month_, day_);
             needs_full_refresh_ = true;

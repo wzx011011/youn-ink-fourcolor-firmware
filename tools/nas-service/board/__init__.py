@@ -1,18 +1,20 @@
-"""Board rendering pipeline.
+"""Board rendering pipeline — pure PIL, zero browser.
 
-Generates HTML/SVG pages, screenshots them via Playwright, dithers to the
-4-color BWRY palette, and pushes the result to the device's Screenshot page.
+Renders boards as pixel-exact images (1-bit text layers + RGB color
+blocks) and pushes them to the device's Screenshot page as 2bpp.
 
-Architecture (plugin-style):
+Architecture:
     board/
-        renderer.py      - Playwright screenshot engine (shared)
-        almanac.py       - 老黄历 data source (lunar_python)
-        templates/       - Jinja2 HTML templates
-            almanac.html
+        pil_renderer.py  - 3-layer compositor (RGB blocks / black / red)
+        almanac.py       - 老黄历 (lunar_python data)
+        news.py          - 热点 (知乎日报)
+        weather.py       - 天气 (Open-Meteo)
+        stock.py         - 股市 (腾讯指数 + 东财板块镜像 + 分时)
+        scheduler.py     - background auto-push rotation
+        config_store.py  - schedule persistence (/data volume)
+        registry.py      - board & template registry
 
-Adding a new board (e.g. weather):
-    1. board/weather.py  - data source returning a dict
-    2. board/templates/weather.html - Jinja2 template
-    3. register in board/registry.py (BOARDS dict)
-No firmware or device changes needed.
+Adding a new template to a board: write render_<tpl>(data) in the board
+module, register TemplateSpec in registry.py. Adding a board: module with
+get_data() + a render fn, BoardSpec entry, PAGE_META annotation in app.py.
 """

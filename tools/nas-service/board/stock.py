@@ -20,18 +20,15 @@ from board.pil_renderer import (
 # 腾讯指数接口(三大指数)
 # sh000001=上证, sz399001=深证, sz399006=创业板
 INDEX_URL = "https://qt.gtimg.cn/q=sh000001,sz399001,sz399006"
-# 板块接口(行业板块涨幅前5)— 腾讯板块代码示例
-SECTOR_CODES = [
-    "bk0428",  # 银行
-    "bk0447",  # 房地产
-    "bk0448",  # 煤炭
-    "bk0449",  # 有色金属
-    "bk0733",  # 半导体
-    "bk0474",  # 电子元件
-    "bk0451",  # 电力
-    "bk0473",  # 汽车整车
-]
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+# 行业板块涨幅榜:东财镜像 host(push2 主站在 NAS 侧被限制,
+# 数字子域如 91.push2 实测可达)。fs=m:90+t:2=行业板块,fid=f3 按涨跌排序。
+SECTOR_URL = (
+    "https://91.push2.eastmoney.com/api/qt/clist/get"
+    "?pn=1&pz=4&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2"
+    "&fields=f3,f14"
+)
+HEADERS = {"User-Agent": "Mozilla/5.0",
+           "Referer": "https://quote.eastmoney.com"}
 
 
 def _fetch_gbk(url):
@@ -39,6 +36,13 @@ def _fetch_gbk(url):
     req = urllib.request.Request(url, headers=HEADERS)
     with urllib.request.urlopen(req, timeout=10) as resp:
         return resp.read().decode("gbk", errors="replace")
+
+
+def _fetch_json_utf8(url):
+    """Fetch a UTF-8 JSON API (eastmoney)."""
+    req = urllib.request.Request(url, headers=HEADERS)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def _parse_tencent_line(line):
@@ -84,6 +88,20 @@ def get_data(target_date: datetime = None) -> dict:
 
     if not indices:
         return {"ok": False, "error": "API 返回数据为空", "indices": []}
+
+    # 行业板块涨幅 Top4(东财镜像)。失败不阻塞。
+    try:
+        raw = _fetch_json_utf8(SECTOR_URL)
+        diff = raw.get("data", {}).get("diff", [])
+        items = diff if isinstance(diff, list) else list(diff.values())
+        for s in items[:4]:
+            sectors.append({
+                "name": s.get("f14", ""),
+                "change_pct": s.get("f3", 0),
+                "up": (s.get("f3") or 0) >= 0,
+            })
+    except Exception:
+        pass
 
     # 分时走势(上证)— 用于画 sparkline。用腾讯分时接口(国内直连稳定)。
     # 失败不阻塞,没走势就只显示数字。
@@ -192,25 +210,41 @@ def render_dashboard(data: dict):
         else:
             draw_text.text((pad, 165), "（走势数据获取中）", font=f16, fill=0)
 
-        # ===== 底部:次级指数(竖线分栏)=====
-        draw_rgb.line([(pad, 214), (SCREEN_W - pad, 214)], fill=C_BLACK, width=1)
+        # ===== 底部:次级指数(竖线分栏)+ 板块涨幅条带 =====
+        has_sectors = bool(data.get("sectors"))
+        sector_top = 274 if has_sectors else None
+        sub_bottom = (sector_top or SCREEN_H) - 10
+
+        draw_rgb.line([(pad, 206), (SCREEN_W - pad, 206)], fill=C_BLACK, width=1)
         if subs:
             col_w = (SCREEN_W - pad * 2) // len(subs)
             for i, idx in enumerate(subs):
                 cx = pad + col_w * i
                 if i > 0:
-                    draw_rgb.line([(cx - 8, 224), (cx - 8, 288)],
+                    draw_rgb.line([(cx - 8, 216), (cx - 8, sub_bottom)],
                                   fill=C_BLACK, width=1)
-                draw_text.text((cx, 226), idx["name"], font=f16, fill=0)
-                draw_text.text((cx, 250), f"{idx['price']:.2f}", font=f24, fill=0)
+                draw_text.text((cx, 218), idx["name"], font=f16, fill=0)
+                draw_text.text((cx, 242), f"{idx['price']:.2f}", font=f24, fill=0)
                 pct = idx["change_pct"]
                 arrow = "▲" if pct >= 0 else "▼"
                 sign = "+" if pct >= 0 else ""
                 pct_str = f"{arrow}{sign}{pct:.2f}%"
                 pww = text_w(draw_text, pct_str, f16)
                 pct_draw = draw_red if pct >= 0 else draw_text
-                pct_draw.text((cx + col_w - pww - 12, 230), pct_str,
+                pct_draw.text((cx + col_w - pww - 12, 222), pct_str,
                               font=f16, fill=0)
+
+        # 板块涨幅条带(单行 16px 纯黑,"名+x.x%"逐段追加,超出即止)
+        if has_sectors:
+            x = pad
+            for s in data["sectors"][:4]:
+                sign = "+" if s["change_pct"] >= 0 else ""
+                seg = f"{s['name']} {sign}{s['change_pct']:.1f}%   "
+                w = text_w(draw_text, seg, f16)
+                if x + w > SCREEN_W - pad:
+                    break
+                draw_text.text((x, 274), seg, font=f16, fill=0)
+                x += w
 
     return pil_renderer.render(layout)
 

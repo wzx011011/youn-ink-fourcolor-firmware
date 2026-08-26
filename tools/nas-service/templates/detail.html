@@ -105,16 +105,25 @@
 <div class="status" id="status">就绪</div>
 
 <script>
-const BOARD_ID = "{{ board }}";
+const BOARD_ID = {{ board|tojson }};
 const $ = id => document.getElementById(id);
 let templates = [];
 let currentTemplate = '';
+const thumbCache = {};   // template_id -> objectURL (reuse for main preview)
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
 
 function setStatus(msg, type) {
   $('status').className = 'status' + (type ? ' ' + type : '');
-  $('status').innerHTML = msg;
+  $('status').textContent = msg;
 }
-function setSpinner(msg) { setStatus('<span class="spinner"></span>' + msg); }
+function setSpinner(msg) {
+  $('status').className = 'status';
+  $('status').innerHTML = '<span class="spinner"></span>' + esc(msg);
+}
 
 async function init() {
   // 拉取看板 + 模板列表
@@ -155,13 +164,14 @@ function renderTemplates() {
 
 async function loadThumb(tplId) {
   try {
-    const url = `/api/board/preview?board=${BOARD_ID}&template=${tplId}&_t=${Date.now()}`;
+    const url = `/api/board/preview?board=${encodeURIComponent(BOARD_ID)}&template=${encodeURIComponent(tplId)}&_t=${Date.now()}`;
     const r = await fetch(url);
     if (r.ok) {
       const blob = await r.blob();
+      thumbCache[tplId] = URL.createObjectURL(blob);
       const img = $('thumb_' + tplId);
       if (img) {
-        img.src = URL.createObjectURL(blob);
+        img.src = thumbCache[tplId];
         img.style.display = 'block';
       }
     }
@@ -175,6 +185,14 @@ function selectTemplate(tplId) {
     c.classList.toggle('selected', c.dataset.id === tplId);
   });
   $('pushBtn').disabled = false;
+  // 缩略图刚加载过同一渲染 → 直接复用,省一次完整管线
+  if (thumbCache[tplId]) {
+    $('preview').src = thumbCache[tplId];
+    $('preview').style.display = 'block';
+    $('previewPlaceholder').style.display = 'none';
+    setStatus('✓ 已选择模板(预览来自缩略图缓存)', 'success');
+    return;
+  }
   refreshPreview();
 }
 
@@ -185,7 +203,7 @@ async function refreshPreview() {
   $('previewPlaceholder').style.display = 'block';
   $('previewPlaceholder').textContent = '生成中...';
   try {
-    const url = `/api/board/preview?board=${BOARD_ID}&template=${currentTemplate}&_t=${Date.now()}`;
+    const url = `/api/board/preview?board=${encodeURIComponent(BOARD_ID)}&template=${encodeURIComponent(currentTemplate)}&_t=${Date.now()}`;
     const r = await fetch(url);
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));

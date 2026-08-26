@@ -791,6 +791,15 @@ void WifiStation::Start() {
                                                         &instance_got_ip_));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
+    // This project runs an always-on HTTP server (board pushes / web
+    // remote). Modem sleep (IDF default MIN_MODEM) buffers unicasts until
+    // the next DTIM beacon, which made TCP handshakes take 2-5s and drop
+    // ~60% of requests under weak signal. The device is mains-powered, so
+    // disable power saving outright. SetPowerSaveLevel() can still override.
+    esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (ps_err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_set_ps(NONE) failed: %s", esp_err_to_name(ps_err));
+    }
 
     if (max_tx_power_ != 0) {
         ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(max_tx_power_));

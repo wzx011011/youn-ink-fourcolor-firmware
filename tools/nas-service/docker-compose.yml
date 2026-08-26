@@ -20,7 +20,5 @@ services:
       - HISTORY_DIR=/data/uploads
       - TZ=Asia/Shanghai
       - PYTHONDONTWRITEBYTECODE=1  # 禁止生成 .pyc,避免改代码后缓存旧版
-      # Playwright Chromium 下载加速(国内)
-      - PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
-    # 看板渲染需要较多内存(Chromium ~400MB),确保 NAS 内存够
-    mem_limit: 2g
+    # 看板为纯 PIL 渲染,常驻内存很小;mem_limit 仅作兜底
+    mem_limit: 1g

@@ -106,6 +106,38 @@ def preview_to_png(dithered_img):
     return buf.getvalue()
 
 
+def _urlopen_retry(req_or_url, timeout=8, attempts=3):
+    """urlopen with retry — the device's WiFi link drops a sizable share of
+    first-connection SYNs; one blind retry converts most failures.
+
+    NOTE: the response is intentionally returned WITHOUT its own `with`
+    block — closing is owned by the caller's outer `with`. Returning it
+    from inside a `with` here would hand the caller an already-closed
+    object ("I/O operation on closed file" on read).
+    """
+    last_err = None
+    for i in range(attempts):
+        try:
+            if isinstance(req_or_url, urllib.request.Request):
+                req = urllib.request.Request(
+                    req_or_url.full_url,
+                    data=req_or_url.data,
+                    method=req_or_url.get_method(),
+                )
+                for k, v in req_or_url.header_items():
+                    req.add_header(k, v)
+            else:
+                req = req_or_url
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError:
+            raise  # Server answered (4xx/5xx): don't retry blindly
+        except Exception as e:
+            last_err = e
+            if i < attempts - 1:
+                time.sleep(0.6 * (i + 1))
+    raise last_err
+
+
 def push_to_device(raw, fmt, title="", endpoint="/upload"):
     """Push raw bytes to the device.
 
@@ -123,7 +155,7 @@ def push_to_device(raw, fmt, title="", endpoint="/upload"):
     req = urllib.request.Request(url, data=raw, method="POST")
     req.add_header("Content-Type", "application/octet-stream")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with _urlopen_retry(req, timeout=30) as resp:
             return True, resp.read().decode("utf-8", errors="replace")
     except Exception as e:
         return False, str(e)
@@ -135,47 +167,57 @@ def device_url(path):
     return f"http://{DEVICE_IP}{port}{path}"
 
 
+# Page metadata merged onto the device-reported page list.
+# type: "raw" = firmware-native UI (tap switches device page immediately)
+#       "board" = NAS-rendered board (tap opens template detail page)
+PAGE_META = {
+    "gallery":      {"name": "相册",     "type": "raw"},
+    "weather":      {"name": "天气",     "type": "board", "board_id": "weather"},
+    "calendar":     {"name": "日历",     "type": "raw"},
+    "news":         {"name": "热点",     "type": "board", "board_id": "news"},
+    "ebook":        {"name": "电子书",   "type": "raw"},
+    "lifebar":      {"name": "人生进度", "type": "raw"},
+    "yearprogress": {"name": "年度进度", "type": "raw"},
+    "almanac":      {"name": "老黄历",   "type": "board", "board_id": "almanac"},
+    "screenshot":   {"name": "看板",     "type": "raw"},
+    "log":          {"name": "日志",     "type": "raw"},
+    "settings":     {"name": "设置",     "type": "raw"},
+}
+
+
 def device_ping():
-    """探测设备是否可达 + 能否控制(返回 (reachable, supports_page_control))。"""
+    """Probe device reachability + remote-control support.
+
+    Zero side effects: only GET endpoints are touched. Reads the real
+    page list from /page/list when available (newer firmware) instead of
+    a hardcoded copy — old firmware without the route reports
+    page_control=False. Returns (reachable, supported, pages_json).
+    """
     try:
-        # 先探活
-        with urllib.request.urlopen(device_url("/status"), timeout=4) as resp:
+        with _urlopen_retry(device_url("/status"), timeout=6) as resp:
             resp.read()
-        # 探测 /page/show 是否支持(新固件才有)。用 OPTIONS 或直接发一个
-        # 无害的 page id,看返回。这里直接发 gallery(safe,已知存在)。
-        body = json.dumps({"page": "gallery"}).encode("utf-8")
-        req = urllib.request.Request(
-            device_url("/page/show"), data=body, method="POST"
-        )
-        req.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                resp.read()
-            # /page/show 响应了 → 支持页面控制
-            # 页面列表在 NAS 端硬编码。type 字段区分:
-            #   "raw"   = 固件原生 UI,点一下直接切设备页
-            #   "board" = NAS 看板(PIL 渲染),点"详情"进模板选择页
-            #             board_id 指向 NAS board 注册表里的看板
-            hardcoded_pages = [
-                {"id": "gallery", "name": "相册", "type": "raw"},
-                {"id": "weather", "name": "天气", "type": "board", "board_id": "weather"},
-                {"id": "calendar", "name": "日历", "type": "raw"},
-                {"id": "news", "name": "热点", "type": "board", "board_id": "news"},
-                {"id": "ebook", "name": "电子书", "type": "raw"},
-                {"id": "lifebar", "name": "人生进度", "type": "raw"},
-                {"id": "yearprogress", "name": "年度进度", "type": "raw"},
-                {"id": "almanac", "name": "老黄历", "type": "board", "board_id": "almanac"},
-                {"id": "stock", "name": "股市", "type": "board", "board_id": "stock"},
-                {"id": "screenshot", "name": "看板", "type": "raw"},
-                {"id": "log", "name": "日志", "type": "raw"},
-                {"id": "settings", "name": "设置", "type": "raw"},
-            ]
-            return True, True, json.dumps(hardcoded_pages)
-        except Exception:
-            # /page/show 不通 → 旧固件,不支持遥控
-            return True, False, "[]"
     except Exception:
         return False, False, "[]"
+
+    try:
+        with _urlopen_retry(device_url("/page/list"), timeout=6) as resp:
+            device_pages = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        # Older firmware: no /page/list route → remote switching unsupported
+        return True, False, "[]"
+
+    # Merge NAS-side metadata (type/board_id) onto device-authored entries
+    pages = []
+    for p in device_pages:
+        meta = PAGE_META.get(p.get("id", ""), {})
+        pages.append({
+            "id": p.get("id"),
+            "name": meta.get("name") or p.get("name") or p.get("id"),
+            "active": p.get("active", False),
+            "type": meta.get("type", "raw"),
+            **({"board_id": meta["board_id"]} if "board_id" in meta else {}),
+        })
+    return True, bool(pages), json.dumps(pages)
 
 
 def device_switch_page(page_id):
@@ -186,7 +228,7 @@ def device_switch_page(page_id):
     )
     req.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=6) as resp:
+        with _urlopen_retry(req, timeout=8) as resp:
             return True, resp.read().decode("utf-8", errors="replace")
     except Exception as e:
         return False, str(e)
@@ -339,20 +381,29 @@ def api_device_switch_page():
 
 
 # ============================================================
-# Board pipeline: HTML → Playwright screenshot → dither → push
+# Board pipeline: PIL 1-bit render → dither → push (no browser)
 # ============================================================
-from jinja2 import Environment, FileSystemLoader, select_autoescape
 from board.registry import BOARDS, get_template
-from board.renderer import board_renderer
 from board import config_store
 from board.scheduler import scheduler
 
-_BOARD_TEMPLATE_DIR = Path(__file__).parent / "board" / "templates"
-_jinja_env = Environment(
-    loader=FileSystemLoader(str(_BOARD_TEMPLATE_DIR)),
-    autoescape=select_autoescape(["html"]),
-    trim_blocks=True, lstrip_blocks=True,
-)
+
+# Short-lived data cache: the detail page fires N template previews at once
+# (N = thumbnails) and each would otherwise re-hit the remote weather/news/
+# stock APIs. 60s TTL keeps previews fresh enough while collapsing that
+# burst to one upstream call per board.
+_DATA_CACHE = {}
+_DATA_TTL = 60
+
+
+def _get_data_cached(spec, board_id):
+    now = time.time()
+    hit = _DATA_CACHE.get(board_id)
+    if hit and now - hit[0] < _DATA_TTL:
+        return hit[1]
+    data = spec.get_data()
+    _DATA_CACHE[board_id] = (now, data)
+    return data
 
 
 def render_board(board_id: str, template_id: str = "", push: bool = False,
@@ -376,9 +427,9 @@ def render_board(board_id: str, template_id: str = "", push: bool = False,
     except KeyError as e:
         return {"ok": False, "error": str(e)}
 
-    # 1. Data (shared across all templates)
+    # 1. Data (shared across all templates; cached to avoid API bursts)
     try:
-        data = spec.get_data()
+        data = _get_data_cached(spec, board_id)
     except Exception as e:
         return {"ok": False, "error": f"data source failed: {e}"}
 
@@ -429,8 +480,12 @@ def api_board_preview():
     if not result.get("ok"):
         return jsonify(result), 400
     preview_b64 = result["preview"].split(",", 1)[1]
-    return send_file(io.BytesIO(base64.b64decode(preview_b64)),
+    resp = send_file(io.BytesIO(base64.b64decode(preview_b64)),
                      mimetype="image/png")
+    # Same template repeats across thumbnail + main preview; let the
+    # browser reuse it (the front-end still busts with &_t for refresh).
+    resp.headers["Cache-Control"] = "public, max-age=60"
+    return resp
 
 
 @app.route("/api/board/render", methods=["POST"])
@@ -452,8 +507,13 @@ def detail_page():
     """Board detail page — shows template selection + preview + push."""
     board = request.args.get("board", "almanac")
     spec = BOARDS.get(board)
-    board_label = spec.label if spec else board
-    return render_template("detail.html", board=board, board_label=board_label)
+    if not spec:
+        # Unknown board id → 404 instead of rendering a page with raw query
+        # echoed into its JS (defense-in-depth against script injection).
+        from flask import abort
+        abort(404)
+    return render_template("detail.html", board=board,
+                           board_label=spec.label)
 
 
 @app.route("/api/board/list", methods=["GET"])

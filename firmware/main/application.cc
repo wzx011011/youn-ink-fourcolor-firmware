@@ -545,7 +545,7 @@ void Application::StartOnlineDataServices() {
             }
         }
         vTaskDelete(nullptr);  // task done, delete itself
-    }, "online_data", 8192, this, 5, nullptr);
+    }, "online_data", 16384, this, 5, nullptr);  // 16K: HTTPS/TLS handshake needs ~10K+
     if (task_created != pdPASS) {
         s_online_task_started.store(false);
         ESP_LOGE(kTag, "Failed to create online data task");

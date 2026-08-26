@@ -75,3 +75,4 @@ tools/*.jpg
 
 # 模板渲染预览产物
 tools/_previews/
+firmware/**/*.txt

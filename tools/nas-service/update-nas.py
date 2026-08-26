@@ -11,7 +11,7 @@
 不适用(需要重建镜像,用 deploy.sh):
   - 改了 requirements.txt(加新 Python 库)
   - 改了 Dockerfile
-  - 升级 Playwright/Chromium
+  - 重建镜像(如 Dockerfile/依赖变更)
 
 用法(在开发机):
   python tools/nas-service/update-nas.py
@@ -41,7 +41,6 @@ SYNC_FILES = [
     "board/config_store.py",
     "board/scheduler.py",
     "board/pil_renderer.py",
-    "board/renderer.py",
     "templates/index.html",
     "templates/detail.html",
 ]

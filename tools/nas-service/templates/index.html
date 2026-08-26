@@ -277,7 +277,7 @@ async function checkDevice() {
 }
 
 function renderPages() {
-  const icons = {gallery:'🖼️',weather:'🌤️',calendar:'📅',news:'📰',ebook:'📖',lifebar:'⏳',yearprogress:'📊',almanac:'📜',screenshot:'📊',log:'📋',settings:'⚙️'};
+  const icons = {gallery:'🖼️',weather:'🌤️',calendar:'📅',news:'📰',ebook:'📖',lifebar:'⏳',yearprogress:'📊',almanac:'📜',stock:'📈',screenshot:'📊',log:'📋',settings:'⚙️'};
   $('pageGrid').innerHTML = pages.map(p => {
     const icon = icons[p.id]||'📄';
     // board 型页面:显示"详情"角标,点击跳详情页选模板

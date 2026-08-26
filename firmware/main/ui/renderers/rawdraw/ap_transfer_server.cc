@@ -1018,29 +1018,58 @@ esp_err_t ApTransferServer::ScreenshotSetHandler(httpd_req_t* req) {
     // page. Query: ?format=bwry2bpp&label=老黄历  Body: raw pixel bytes
     // (30000 for 2bpp, 15000 for 1bpp, both 400x300).
     auto* self = static_cast<ApTransferServer*>(req->user_ctx);
+    auto drain_body = [](httpd_req_t* r) {
+        // Rejecting a request without consuming its body makes LWIP close
+        // with RST while inbound bytes are still pending — the client then
+        // sees the connection reset instead of our JSON. Drain first.
+        char sink[512];
+        int remaining = static_cast<int>(r->content_len);
+        while (remaining > 0) {
+            int n = httpd_req_recv(r, sink,
+                                   remaining < static_cast<int>(sizeof(sink))
+                                       ? remaining
+                                       : static_cast<int>(sizeof(sink)));
+            if (n <= 0) break;
+            remaining -= n;
+        }
+    };
     if (!self) {
+        drain_body(req);
         SendJson(req, "{\"success\":false,\"error\":\"no_ctx\"}");
-        return ESP_FAIL;
+        return ESP_OK;
     }
 
-    char query[128] = {};
+    char query[256] = {};
     char format[16] = {};
-    char label[48] = {};
+    char label[96] = {};  // ~10 CJK chars after percent-decoding (9B each)
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-        httpd_query_key_value(query, "format", format, sizeof(format));
-        httpd_query_key_value(query, "label", label, sizeof(label));
+        if (httpd_query_key_value(query, "format", format, sizeof(format)) != ESP_OK)
+            format[0] = '\0';
+        esp_err_t lr = httpd_query_key_value(query, "label", label, sizeof(label));
+        if (lr == ESP_ERR_HTTPD_RESULT_TRUNC) {
+            // Label is only a display name — degrade to a short default
+            // rather than reject. (Rejecting would still require draining
+            // the 30KB body before answering, and even then the small
+            // JSON response races the session teardown: observed LWIP
+            // RST-before-body on the client.)
+            strncpy(label, "\xE7\x9C\x8B\xE6\x9D\xBF", sizeof(label));  // 看板
+            label[sizeof(label) - 1] = '\0';
+            ESP_LOGW(kTag, "Screenshot label truncated, using default");
+        }
     }
     const bool is_2bpp = strcmp(format, "bwry2bpp") == 0 || strcmp(format, "2bpp") == 0;
     const size_t expected_size = is_2bpp ? kImage2bppSize : kImage1bppSize;
 
     if (req->content_len != expected_size) {
+    if (req->content_len != expected_size) {
         ESP_LOGW(kTag, "Screenshot wrong size: %u (need %u)",
                  static_cast<unsigned>(req->content_len),
                  static_cast<unsigned>(expected_size));
+        drain_body(req);
         SendJson(req, is_2bpp
             ? "{\"success\":false,\"error\":\"需要400x300 2bpp数据(30000字节)\"}"
             : "{\"success\":false,\"error\":\"需要400x300 1bpp数据(15000字节)\"}");
-        return ESP_FAIL;
+        return ESP_OK;  // drained + replied; clean close
     }
 
     auto* buf = static_cast<uint8_t*>(malloc(expected_size));
@@ -1062,22 +1091,27 @@ esp_err_t ApTransferServer::ScreenshotSetHandler(httpd_req_t* req) {
         return ESP_FAIL;
     }
 
-    // URL-decode the label query value (httpd_query_key_value returns percent-
-    // encoded form; the NAS sends UTF-8 percent-encoded Chinese labels).
+    // URL-decode the label query value. Percent sequences that fail hex
+    // parsing are copied through verbatim (no silent 0x00 bytes); '+' is
+    // kept as-is because encodeURIComponent never produces it.
     std::string label_str;
-    label_str.reserve(32);
+    label_str.reserve(48);
+    auto hex_val = [](char c, uint8_t* out) -> bool {
+        if (c >= '0' && c <= '9') { *out = static_cast<uint8_t>(c - '0'); return true; }
+        if (c >= 'a' && c <= 'f') { *out = static_cast<uint8_t>(c - 'a' + 10); return true; }
+        if (c >= 'A' && c <= 'F') { *out = static_cast<uint8_t>(c - 'A' + 10); return true; }
+        return false;
+    };
     for (const char* p = label; *p; ++p) {
         if (*p == '%' && p[1] && p[2]) {
-            auto hex = [](char c) {
-                if (c >= '0' && c <= '9') return c - '0';
-                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-                return 0;
-            };
-            label_str.push_back(static_cast<char>((hex(p[1]) << 4) | hex(p[2])));
-            p += 2;
-        } else if (*p == '+') {
-            label_str.push_back(' ');
+            uint8_t hi = 0, lo = 0;
+            if (hex_val(p[1], &hi) && hex_val(p[2], &lo)) {
+                label_str.push_back(static_cast<char>((hi << 4) | lo));
+                p += 2;
+            } else {
+                // Not a valid escape: keep the '%' literally
+                label_str.push_back('%');
+            }
         } else {
             label_str.push_back(*p);
         }

@@ -40,7 +40,12 @@ DEFAULT_SCHEDULES = {
 
 
 def load():
-    """Load schedules from disk, merging defaults for missing keys."""
+    """Load schedules from disk, merging defaults for missing keys.
+
+    Entries for boards not in DEFAULT_SCHEDULES (newly registered boards)
+    are preserved — dropping them would silently lose their config on the
+    next save(). Defaults only fill in gaps.
+    """
     with _lock:
         if CONFIG_PATH.exists():
             try:
@@ -51,10 +56,19 @@ def load():
                 saved = {}
         else:
             saved = {}
-        # Merge: defaults + saved overrides (preserves new boards added later)
+
+        fallback = {"enabled": False, "template": "",
+                    "interval_min": 60, "smart": False}
         merged = {}
+        # Keep every board already saved on disk (unknown ones included)
+        for bid, cfg in saved.items():
+            base = dict(DEFAULT_SCHEDULES.get(bid) or fallback)
+            base.update(cfg)
+            merged[bid] = base
+        # Fill in defaults for built-in boards absent from disk
         for bid, default in DEFAULT_SCHEDULES.items():
-            merged[bid] = {**default, **saved.get(bid, {})}
+            if bid not in merged:
+                merged[bid] = dict(default)
         return merged
 
 

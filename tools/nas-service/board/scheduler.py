@@ -75,22 +75,39 @@ class BoardScheduler:
             self._stop.wait(60)
 
     def _tick(self):
+        """Check due boards; push at most ONE per tick.
+
+        The device has a single Screenshot slot, so pushing several due
+        boards back-to-back would just have them overwrite each other.
+        Picking the least-recently-pushed due board turns the schedule
+        into an orderly rotation instead of a stampede. It also fixes the
+        startup thundering herd (_last_pushed starts empty).
+        """
         schedules = config_store.load()
         now = time.time()
         now_dt = datetime.now()
+
+        due = []
         for board_id, cfg in schedules.items():
             if not cfg.get("enabled"):
                 continue
-            # Smart mode: skip if not in trading hours (for stock)
             if cfg.get("smart") and not _is_trading_hours(now_dt):
                 continue
             interval = int(cfg.get("interval_min", 60)) * 60
-            template = cfg.get("template", "")
-            last = self._last_pushed.get(board_id, 0)
-            if now - last >= interval:
-                logger.info("scheduler: pushing %s/%s (last %.0fs ago)",
-                            board_id, template, now - last)
-                self._push(board_id, template)
+            elapsed = now - self._last_pushed.get(board_id, 0)
+            if elapsed >= interval:
+                due.append((elapsed, board_id))
+
+        if not due:
+            return
+
+        # Most stale first — exactly one push per tick (60s spacing)
+        due.sort(reverse=True)
+        _, board_id = due[0]
+        template = schedules[board_id].get("template", "")
+        logger.info("scheduler: pushing %s/%s (%d due, picked most stale)",
+                    board_id, template, len(due))
+        self._push(board_id, template)
 
     def _push(self, board_id, template_id):
         if not self._render_fn:
@@ -99,13 +116,17 @@ class BoardScheduler:
         try:
             result = self._render_fn(board_id, template_id=template_id,
                                      push=True, auto_switch=True)
+            # Mark on failure too: a device that's offline shouldn't wedge
+            # the rotation onto one repeatedly-failing board. The next due
+            # window will try again naturally.
+            self.mark_pushed(board_id)
             if result.get("ok"):
-                self.mark_pushed(board_id)
                 logger.info("scheduler: pushed %s OK", board_id)
             else:
-                logger.warning("scheduler: push %s failed: %s",
-                               board_id, result.get("error"))
+                logger.warning("scheduler: push %s failed: %s (will retry "
+                               "next window)", board_id, result.get("error"))
         except Exception as e:
+            self.mark_pushed(board_id)
             logger.exception("scheduler: push %s exception: %s", board_id, e)
 
 
