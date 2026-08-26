@@ -8,6 +8,7 @@
  */
 
 #include "lifebar_renderer.h"
+#include "settings.h"
 #include "rawdraw/rawdraw.h"
 #include "rawdraw/layout_utils.h"  // FIX: 使用 InkCenteredTextTopY 替代 line_height 居中
 #include "rawdraw/components/progress_bar.h"
@@ -27,9 +28,11 @@ namespace rawdraw {
 // Configurable defaults
 // ============================================================
 
-static constexpr int BIRTH_YEAR  = 1990;
-static constexpr int BIRTH_MONTH = 1;
-static constexpr int BIRTH_DAY   = 1;
+// Birth date defaults; overridden by NVS "lifebar" namespace keys
+// (settable from the NAS web panel → POST /api/device/lifebar_birth).
+static constexpr int BIRTH_YEAR_DEF  = 1990;
+static constexpr int BIRTH_MONTH_DEF = 1;
+static constexpr int BIRTH_DAY_DEF   = 1;
 static constexpr int EXPECTED_LIFESPAN_YEARS = 80;
 
 // Motivational quotes (rotated by index)
@@ -84,22 +87,28 @@ void LifeBarRenderer::UpdateStats() {
     int cur_month = tm_now.tm_mon + 1;   // 1-based
     int cur_day   = tm_now.tm_mday;
 
+    // Birth date from NVS (falls back to defaults when never configured)
+    Settings nvs("lifebar", false);
+    const int birth_year  = nvs.GetInt("birth_y", BIRTH_YEAR_DEF);
+    const int birth_month = nvs.GetInt("birth_m", BIRTH_MONTH_DEF);
+    const int birth_day   = nvs.GetInt("birth_d", BIRTH_DAY_DEF);
+
     // Days elapsed since birth
     int total_days = 0;
 
     // Full years
-    for (int y = BIRTH_YEAR; y < cur_year; y++) {
+    for (int y = birth_year; y < cur_year; y++) {
         total_days += is_leap(y) ? 366 : 365;
     }
 
-    // Full months of current year
-    for (int m = 0; m < cur_month - 1; m++) {
+    // Full months of current year (months are 1-based: Jan..cur_month-1)
+    for (int m = 1; m < cur_month; m++) {
         total_days += days_in_month(cur_year, m);
     }
 
     // Days of current month (minus birth offset for first year)
-    if (cur_year == BIRTH_YEAR) {
-        total_days += cur_day - BIRTH_DAY;
+    if (cur_year == birth_year) {
+        total_days += cur_day - birth_day;
     } else {
         total_days += cur_day;
     }
@@ -108,18 +117,18 @@ void LifeBarRenderer::UpdateStats() {
 
     // Total lifespan in days
     int lifespan_days = 0;
-    for (int y = BIRTH_YEAR; y < BIRTH_YEAR + EXPECTED_LIFESPAN_YEARS; y++) {
+    for (int y = birth_year; y < birth_year + EXPECTED_LIFESPAN_YEARS; y++) {
         lifespan_days += is_leap(y) ? 366 : 365;
     }
 
     // Age
-    age_years_ = cur_year - BIRTH_YEAR;
-    age_months_ = cur_month - BIRTH_MONTH;
+    age_years_ = cur_year - birth_year;
+    age_months_ = cur_month - birth_month;
     if (age_months_ < 0) {
         age_years_--;
         age_months_ += 12;
     }
-    if (cur_day < BIRTH_DAY) {
+    if (cur_day < birth_day) {
         age_months_--;
         if (age_months_ < 0) {
             age_years_--;

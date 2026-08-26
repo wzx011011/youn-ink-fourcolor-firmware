@@ -22,6 +22,7 @@ from board import almanac
 from board import news
 from board import weather
 from board import stock
+from board import chat
 
 
 @dataclass
@@ -77,6 +78,15 @@ BOARDS: Dict[str, BoardSpec] = {
         templates={
             "dashboard": TemplateSpec("dashboard", "看盘版", stock.render_dashboard),
             "simple": TemplateSpec("simple", "简洁版", stock.render_simple),
+        },
+    ),
+    # AI 对话:get_data() 无参调用时不发起提问(问答由 /api/board/chat
+    # 携带 question 触发)。直接绑定 chat.get_data 以兼容两种签名。
+    "chat": BoardSpec(
+        label="AI对话",
+        get_data=chat.get_data,
+        templates={
+            "text": TemplateSpec("text", "问答版", chat.render_text),
         },
     ),
 }

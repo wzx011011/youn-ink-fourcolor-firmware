@@ -84,6 +84,11 @@ public:
                                                   int w, int h, bool is_2bpp)>;
     void SetScreenshotCallback(ScreenshotCallback callback);
 
+    // LifeBar birth date (from the NAS web panel). The callback persists
+    // to NVS and refreshes the LifeBar page if visible.
+    using LifeBarBirthCallback = std::function<bool(int y, int m, int d)>;
+    void SetLifeBarBirthCallback(LifeBarBirthCallback callback);
+
 private:
     enum class TransferMode {
         kNone,
@@ -109,6 +114,7 @@ private:
     std::function<bool(const std::string& page_id)> switch_page_callback_;
     std::function<std::string()> page_list_callback_;  // returns JSON array string
     ScreenshotCallback screenshot_callback_;
+    LifeBarBirthCallback lifebar_birth_callback_;
 
     bool StartAccessPoint();
     const std::string& GetApIp() const { return ap_ip_; }
@@ -127,6 +133,7 @@ private:
     static esp_err_t PhotoShowHandler(httpd_req_t* req);
     static esp_err_t PageShowHandler(httpd_req_t* req);
     static esp_err_t ScreenshotSetHandler(httpd_req_t* req);
+    static esp_err_t LifeBarBirthHandler(httpd_req_t* req);
     static esp_err_t PageListHandler(httpd_req_t* req);
     
     // Notify state change

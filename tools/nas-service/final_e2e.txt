@@ -1,0 +1,15 @@
+PASS N1 NAS 服务/看板列表
+PASS N2 设备可达
+PASS N3 device_status reachable=True pages=11
+FAIL N4 14模板远端渲染全通过
+PASS N5 chat 引导态渲染
+PASS N6 push almanac/classic pushed=True
+PASS N6 push news/list pushed=True
+PASS N6 push weather/card pushed=True
+PASS N6 push stock/dashboard pushed=True
+PASS N7 chat key 门禁 need_key
+PASS N8 lifebar birth 写入
+FAIL N9 schedule >=5板(news=240持久)
+PASS N10 设备 active=screenshot(['screenshot'])
+
+==== 最终端到端 PASS=11 FAIL=2 ====

@@ -204,11 +204,39 @@ input[type=file] { display: none; }
     <h3>⏰ 定时推送</h3>
     <div style="font-size:12px;color:#666;margin-bottom:10px">
       勾选的看板会按设定频率自动推送到设备。⭐ 股市默认智能模式(仅交易时段)。
+      同一时段多个看板到期时按「最久未更新优先」轮流上屏。
     </div>
     <div id="scheduleList" style="display:flex;flex-direction:column;gap:10px">
       <div style="color:#666;font-size:13px">加载中...</div>
     </div>
     <button class="btn btn-primary" style="margin-top:12px" onclick="saveSchedule()">💾 保存定时</button>
+  </div>
+  <div class="settings-box">
+    <h3>🎂 人生进度 · 出生日期</h3>
+    <div style="font-size:12px;color:#666;margin-bottom:8px">
+      设置后写入设备存储,「人生进度」页面按此日期计算。
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;font-size:13px;color:#ddd">
+      <input type="number" id="birthY" placeholder="1990" min="1900" max="2100"
+             style="width:80px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;padding:8px;color:#ddd"> 年
+      <input type="number" id="birthM" placeholder="1" min="1" max="12"
+             style="width:60px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;padding:8px;color:#ddd"> 月
+      <input type="number" id="birthD" placeholder="1" min="1" max="31"
+             style="width:60px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;padding:8px;color:#ddd"> 日
+    </div>
+    <button class="btn btn-primary" style="margin-top:10px" onclick="saveBirth()">💾 保存出生日期</button>
+  </div>
+  <div class="settings-box">
+    <h3>🤖 AI 对话 (dify)</h3>
+    <div style="font-size:12px;color:#666;margin-bottom:8px">
+      粘贴 dify 应用的 API Key(dify 控制台 → 应用 → 访问 API)。保存在 NAS,不会进入固件。
+    </div>
+    <div style="display:flex;gap:8px">
+      <input type="password" id="difyKey" placeholder="app-xxxxxxxx"
+             style="flex:1;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;padding:8px;color:#ddd">
+      <button class="btn btn-primary" style="padding:8px 14px" onclick="saveDifyKey()">保存</button>
+    </div>
+    <div id="difyStatus" style="font-size:11px;color:#888;margin-top:6px"></div>
   </div>
   <div class="settings-box">
     <h3>ℹ️ 关于</h3>
@@ -241,7 +269,7 @@ document.querySelectorAll('.tab').forEach(t => {
     t.classList.add('active');
     $('panel-' + t.dataset.tab).classList.add('active');
     if (t.dataset.tab === 'control') checkDevice();
-    if (t.dataset.tab === 'settings') { loadConfig(); loadSchedule(); }
+    if (t.dataset.tab === 'settings') { loadConfig(); loadSchedule(); loadDifyKey(); }
   };
 });
 
@@ -512,6 +540,48 @@ async function saveSchedule() {
   } else {
     setStatus(`保存完成(${ok}成功/${fail}失败)`, 'error');
   }
+}
+
+async function loadDifyKey() {
+  try {
+    const r = await fetch('/api/dify_key');
+    const d = await r.json();
+    $('difyStatus').textContent = d.configured
+      ? '✓ 已配置 API Key' : '未配置,填入后可使用「AI对话」看板';
+    $('difyStatus').style.color = d.configured ? '#34c759' : '#888';
+  } catch (e) {}
+}
+
+async function saveDifyKey() {
+  const key = $('difyKey').value.trim();
+  setSpinner('保存 Key...');
+  try {
+    const r = await fetch('/api/dify_key', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({key})
+    });
+    const j = await r.json();
+    if (j.ok) {
+      $('difyStatus').textContent = j.configured ? '✓ 已配置 API Key' : '已清除';
+      $('difyStatus').style.color = '#34c759';
+      setStatus(j.configured ? '✓ dify Key 已保存' : 'dify Key 已清除', 'success');
+    } else throw new Error(j.error || '失败');
+  } catch (e) { setStatus('保存失败: ' + e.message, 'error'); }
+}
+
+async function saveBirth() {
+  const y = parseInt($('birthY').value), m = parseInt($('birthM').value), d = parseInt($('birthD').value);
+  if (!y || !m || !d) { setStatus('请填写完整的年月日', 'error'); return; }
+  setSpinner('保存出生日期到设备...');
+  try {
+    const r = await fetch('/api/device/lifebar_birth', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({y, m, d})
+    });
+    const j = await r.json();
+    if (j.ok) setStatus(`✓ 出生日期 ${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')} 已写入设备`, 'success');
+    else throw new Error(j.error || '设备返回失败');
+  } catch (e) { setStatus('保存失败: ' + e.message, 'error'); }
 }
 
 // 启动时检测设备

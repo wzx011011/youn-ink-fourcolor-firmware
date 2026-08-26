@@ -72,6 +72,9 @@
 <div class="nav">
   <a href="/" class="back">‹</a>
   <h1 id="title">加载中...</h1>
+  <button id="nativeBtn" style="margin-left:auto;display:none;background:#3a3a3a;border:none;
+    color:#ddd;font-size:12px;padding:8px 12px;border-radius:8px;cursor:pointer"
+    onclick="switchNative()">切到设备原生页</button>
 </div>
 
 <!-- 模板卡片网格 -->
@@ -97,9 +100,15 @@
   <input type="checkbox" id="autoSwitch" checked>
   <label for="autoSwitch">推送后自动切到设备「看板」页</label>
 </div>
+<!-- AI 提问框(仅 chat 看板) -->
+<div id="chatRow" style="display:none;margin-bottom:8px">
+  <input type="text" id="chatQuestion" placeholder="输入问题,AI 回答将推送到墨水屏"
+         style="width:100%;background:#1a1a1a;color:#ddd;border:1px solid #3a3a3a;
+                border-radius:8px;padding:10px;font-size:14px">
+</div>
 <div class="actions">
   <button class="btn btn-secondary" onclick="refreshPreview()">🔄 刷新预览</button>
-  <button class="btn btn-primary" id="pushBtn" onclick="pushToDevice()" disabled>📤 推送到设备</button>
+  <button class="btn btn-primary" id="pushBtn" onclick="mainAction()" disabled>📤 推送到设备</button>
 </div>
 
 <div class="status" id="status">就绪</div>
@@ -125,7 +134,29 @@ function setSpinner(msg) {
   $('status').innerHTML = '<span class="spinner"></span>' + esc(msg);
 }
 
+async function switchNative() {
+  // 看板 id 与设备原生 page id 同名(almanac/news/weather)
+  setStatus('切换到设备原生页...');
+  try {
+    await fetch('/api/device/switch_page', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({page: BOARD_ID})
+    });
+    setStatus('✓ 已切到设备原生「' + $('title').textContent + '」页', 'success');
+  } catch (e) { setStatus('切换失败: ' + e.message, 'error'); }
+}
+
 async function init() {
+  // 与设备原生同名页的看板提供直达按钮
+  if (['almanac', 'news', 'weather'].includes(BOARD_ID)) {
+    $('nativeBtn').style.display = 'inline-block';
+  }
+  // chat 看板:显示提问框,主按钮变为「提问并推送」
+  if (BOARD_ID === 'chat') {
+    $('chatRow').style.display = 'block';
+    $('pushBtn').textContent = '💬 提问并推送';
+    $('autoSwitch').closest('.option-row').style.display = 'none';
+  }
   // 拉取看板 + 模板列表
   try {
     const r = await fetch('/api/board/list');
@@ -217,6 +248,36 @@ async function refreshPreview() {
   } catch (e) {
     $('previewPlaceholder').textContent = '生成失败: ' + e.message;
     setStatus('预览失败: ' + e.message, 'error');
+  }
+}
+
+async function mainAction() {
+  if (BOARD_ID === 'chat') return askAndPush();
+  return pushToDevice();
+}
+
+async function askAndPush() {
+  const q = $('chatQuestion').value.trim();
+  if (!q) { setStatus('请输入问题', 'error'); return; }
+  const autoSwitch = $('autoSwitch') && $('autoSwitch').checked;
+  setSpinner('AI 思考中(最长约 60 秒)...');
+  try {
+    const r = await fetch('/api/board/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question: q, auto_switch: autoSwitch})
+    });
+    const d = await r.json();
+    if (d.ok) {
+      if (d.preview) {
+        $('preview').src = d.preview;
+        $('preview').style.display = 'block';
+        $('previewPlaceholder').style.display = 'none';
+      }
+      setStatus(`✓ AI 回答已推送到墨水屏`, 'success');
+    } else throw new Error(d.error || '失败');
+  } catch (e) {
+    setStatus('失败: ' + e.message, 'error');
   }
 }
 

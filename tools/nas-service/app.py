@@ -380,6 +380,34 @@ def api_device_switch_page():
     return jsonify(ok=ok, message=msg, page=page_id, device=f"{DEVICE_IP}:{UPLOAD_PORT}")
 
 
+@app.route("/api/device/lifebar_birth", methods=["POST"])
+def api_device_lifebar_birth():
+    """配置人生进度出生日期。转发给设备存 NVS。Body: {y,m,d}"""
+    data = request.get_json(force=True, silent=True) or {}
+    y, m, d = data.get("y"), data.get("m"), data.get("d")
+    if not all(isinstance(v, int) for v in (y, m, d)):
+        return jsonify(ok=False, error="y/m/d 需为整数"), 400
+    url = device_url("/lifebar/birth")
+    body = json.dumps({"y": y, "m": m, "d": d}).encode()
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with _urlopen_retry(req, timeout=10) as resp:
+            resp_body = resp.read().decode("utf-8", errors="replace")
+        ok = '"success":true' in resp_body
+        # Surface the device's own error field (e.g. invalid_date) if present
+        dev_err = None
+        if not ok:
+            try:
+                dev_err = json.loads(resp_body).get("error") or resp_body
+            except Exception:
+                dev_err = resp_body
+        return jsonify(ok=ok, device=f"{DEVICE_IP}:{UPLOAD_PORT}",
+                       error=dev_err)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 502
+
+
 # ============================================================
 # Board pipeline: PIL 1-bit render → dither → push (no browser)
 # ============================================================
@@ -407,11 +435,13 @@ def _get_data_cached(spec, board_id):
 
 
 def render_board(board_id: str, template_id: str = "", push: bool = False,
-                 auto_switch: bool = True):
+                 auto_switch: bool = True, data_override=None):
     """Render a board template to 2bpp bytes. Optionally push to device.
 
     template_id: which template to render (e.g. 'classic', 'minimal').
                  Empty/unknown falls back to the board's first template.
+    data_override: extra kwargs for the board's get_data (e.g. chat's
+                 question). When provided the cache is bypassed.
     auto_switch: if True (and push True), switch the device to the board page.
     Returns dict: {ok, label, template, preview_b64, raw_b64, pushed}.
     """
@@ -429,7 +459,10 @@ def render_board(board_id: str, template_id: str = "", push: bool = False,
 
     # 1. Data (shared across all templates; cached to avoid API bursts)
     try:
-        data = _get_data_cached(spec, board_id)
+        if data_override is not None:
+            data = spec.get_data(**data_override)
+        else:
+            data = _get_data_cached(spec, board_id)
     except Exception as e:
         return {"ok": False, "error": f"data source failed: {e}"}
 
@@ -532,11 +565,58 @@ def api_board_list():
     return jsonify(boards=boards)
 
 
+@app.route("/api/board/chat", methods=["POST"])
+def api_board_chat():
+    """Ask dify, render the answer, push to the device.
+    Body: {question: "...", auto_switch: bool} """
+    from board import chat as chat_mod
+    data = request.get_json(force=True, silent=True) or {}
+    question = (data.get("question") or "").strip()
+    if not question:
+        return jsonify(ok=False, error="请输入问题"), 400
+    # Don't waste an e-ink refresh on a guidance screen — reject early so
+    # the phone can prompt for the API key instead.
+    if not chat_mod._api_key():
+        return jsonify(ok=False,
+                       error="未配置 DIFY_API_KEY,请在「设置」页粘贴 dify 应用 Key",
+                       need_key=True), 400
+    auto_switch = bool(data.get("auto_switch", True))
+    result = render_board("chat", template_id="text", push=True,
+                          auto_switch=auto_switch,
+                          data_override={"question": question})
+    code = 200 if result.get("ok") else 400
+    return jsonify(result), code
+
+
+@app.route("/api/dify_key", methods=["GET", "POST"])
+def api_dify_key():
+    """Get/set the dify app API key (persisted in the /data config)."""
+    from board import chat as chat_mod
+    if request.method == "GET":
+        key = chat_mod._api_key()
+        return jsonify(configured=bool(key))
+    data = request.get_json(force=True, silent=True) or {}
+    key = (data.get("key") or "").strip()
+    try:
+        chat_mod.set_api_key(key)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 500
+    return jsonify(ok=True, configured=bool(key))
+
+
 @app.route("/api/schedule", methods=["GET"])
 def api_schedule_get():
     """Get all board push schedules."""
     schedules = config_store.load()
-    # Annotate with board labels for the UI
+    # Show every registered board in the UI even before its first save;
+    # unconfigured boards default to disabled and are simply ignored by
+    # the scheduler until the user enables them.
+    for bid, spec in BOARDS.items():
+        if bid not in schedules:
+            first = next(iter(spec.templates.values()), None)
+            schedules[bid] = {"enabled": False,
+                              "template": first.id if first else "",
+                              "interval_min": 60, "smart": False}
     for bid, cfg in schedules.items():
         spec = BOARDS.get(bid)
         cfg["label"] = spec.label if spec else bid

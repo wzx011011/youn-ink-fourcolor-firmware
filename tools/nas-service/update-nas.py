@@ -37,6 +37,7 @@ SYNC_FILES = [
     "board/news.py",
     "board/weather.py",
     "board/stock.py",
+    "board/chat.py",
     "board/registry.py",
     "board/config_store.py",
     "board/scheduler.py",

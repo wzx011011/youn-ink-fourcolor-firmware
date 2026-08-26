@@ -611,6 +611,15 @@ bool ApTransferServer::StartHttpServer() {
     };
     if (!register_handler(screenshot_set_uri)) return false;
 
+    // LifeBar birth date configuration (from NAS web panel)
+    httpd_uri_t lifebar_birth_uri = {
+        .uri = "/lifebar/birth",
+        .method = HTTP_POST,
+        .handler = LifeBarBirthHandler,
+        .user_ctx = this
+    };
+    if (!register_handler(lifebar_birth_uri)) return false;
+
     ESP_LOGI(kTag, "HTTP server started at http://%s/", ap_ip_.c_str());
     return true;
 }
@@ -1061,7 +1070,6 @@ esp_err_t ApTransferServer::ScreenshotSetHandler(httpd_req_t* req) {
     const size_t expected_size = is_2bpp ? kImage2bppSize : kImage1bppSize;
 
     if (req->content_len != expected_size) {
-    if (req->content_len != expected_size) {
         ESP_LOGW(kTag, "Screenshot wrong size: %u (need %u)",
                  static_cast<unsigned>(req->content_len),
                  static_cast<unsigned>(expected_size));
@@ -1164,6 +1172,42 @@ void ApTransferServer::SetPageListCallback(std::function<std::string()> callback
 
 void ApTransferServer::SetScreenshotCallback(ScreenshotCallback callback) {
     screenshot_callback_ = std::move(callback);
+}
+
+void ApTransferServer::SetLifeBarBirthCallback(LifeBarBirthCallback callback) {
+    lifebar_birth_callback_ = std::move(callback);
+}
+
+esp_err_t ApTransferServer::LifeBarBirthHandler(httpd_req_t* req) {
+    // Body: {"y":1990,"m":1,"d":1} — persists via lifebar_birth_callback_.
+    cJSON* root = ReadJsonBody(req);
+    if (!root) {
+        SendJson(req, "{\"success\":false,\"error\":\"bad_json\"}");
+        return ESP_OK;
+    }
+    const int y = static_cast<int>(cJSON_GetObjectItem(root, "y")
+                                       ? cJSON_GetObjectItem(root, "y")->valueint : 0);
+    const int m = static_cast<int>(cJSON_GetObjectItem(root, "m")
+                                       ? cJSON_GetObjectItem(root, "m")->valueint : 0);
+    const int d = static_cast<int>(cJSON_GetObjectItem(root, "d")
+                                       ? cJSON_GetObjectItem(root, "d")->valueint : 0);
+    cJSON_Delete(root);
+
+    auto* self = static_cast<ApTransferServer*>(req->user_ctx);
+    if (!self || !self->lifebar_birth_callback_) {
+        SendJson(req, "{\"success\":false,\"error\":\"no_callback\"}");
+        return ESP_OK;
+    }
+    if (y < 1900 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) {
+        SendJson(req, "{\"success\":false,\"error\":\"invalid_date\"}");
+        return ESP_OK;
+    }
+    const bool ok = self->lifebar_birth_callback_(y, m, d);
+    char buf[48];
+    snprintf(buf, sizeof(buf),
+             ok ? "{\"success\":true}" : "{\"success\":false,\"error\":\"save_failed\"}");
+    SendJson(req, buf);
+    return ESP_OK;
 }
 
 }  // namespace rawdraw

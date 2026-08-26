@@ -342,6 +342,23 @@ RawDrawUiManager::RawDrawUiManager()
                int w, int h, bool is_2bpp) {
             return QueueScreenshot(label, data, size, w, h, is_2bpp);
         });
+    // LifeBar birth date: persist to NVS; refresh the LifeBar page if the
+    // user is currently viewing it.
+    ap_transfer_server_->SetLifeBarBirthCallback(
+        [this](int y, int m, int d) {
+            Settings nvs("lifebar", true);
+            nvs.SetInt("birth_y", y);
+            nvs.SetInt("birth_m", m);
+            nvs.SetInt("birth_d", d);
+            ESP_LOGI(kTag, "LifeBar birth set to %04d-%02d-%02d", y, m, d);
+            if (lifebar_renderer_) {
+                lifebar_renderer_->MarkFullRefresh();
+                if (current_page_ == RawDrawPageId::LifeBar) {
+                    RequestActivePageRefresh();
+                }
+            }
+            return true;
+        });
 
     // Initialize status bar defaults
     status_bar_data_.page_title = GetPageTitle(RawDrawPageId::Gallery);
