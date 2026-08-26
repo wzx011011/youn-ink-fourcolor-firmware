@@ -76,3 +76,5 @@ tools/*.jpg
 # 模板渲染预览产物
 tools/_previews/
 firmware/**/*.txt
+tools/nas-service/*_e2e.txt
+tools/nas-service/reg_out.txt

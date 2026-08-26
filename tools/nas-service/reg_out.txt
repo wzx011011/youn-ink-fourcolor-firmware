@@ -1,8 +1,0 @@
-PASS R1 看板数=5 (5)
-FAIL R4 未配key优雅提示 (code=400, err=data source failed: <lam)
-FAIL R5 birth写入 (HTTP Error 404: Not Found)
-PASS R6 news interval=240持久化
-PASS R7 dify_key configured=False
-PASS R8 设备存活
-
-==== 补充回归 PASS=4 FAIL=2 ====
