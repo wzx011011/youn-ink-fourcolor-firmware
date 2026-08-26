@@ -29,9 +29,11 @@ static constexpr char kTag[] = "HolidayFetcher";
 static constexpr char kNvsNamespace[] = "holiday_cache";
 static constexpr int kMaxResponseSize = 8192;
 
-// In-memory cache (populated from NVS at init)
-static HolidayCache s_cache = {};
-static bool s_loaded = false;
+// Retain the current and following year so the calendar remains correct across
+// New Year without replacing the cache that is still visible to the UI.
+static constexpr int kCacheSlots = 2;
+static HolidayCache s_caches[kCacheSlots] = {};
+static bool s_loaded[kCacheSlots] = {};
 
 // HTTP response buffer
 static char s_resp_buf[kMaxResponseSize + 1] = {0};
@@ -52,7 +54,8 @@ static esp_err_t HttpEvent(esp_http_client_event_t* evt) {
  * @brief Parse JSON response and populate cache.
  * Expected: {"code":0, "holiday":{"2026-01-01":{"name":"X","rest":1},...}}
  */
-static bool ParseResponse(int year, const char* json, int len) {
+static bool ParseResponse(int year, const char* json, int len, HolidayCache* cache) {
+    if (!cache) return false;
     // Find "holiday" object
     const char* holiday_start = strstr(json, "\"holiday\"");
     if (!holiday_start) {
@@ -64,14 +67,14 @@ static bool ParseResponse(int year, const char* json, int len) {
     const char* obj_start = strchr(holiday_start, '{');
     if (!obj_start) return false;
 
-    s_cache.year = year;
-    s_cache.entry_count = 0;
+    cache->year = year;
+    cache->entry_count = 0;
 
     // Scan for date entries: "YYYY-MM-DD":{...}
     char date_pattern[16];
     const char* pos = obj_start + 1;
 
-    while (s_cache.entry_count < kMaxHolidayEntries && pos < json + len) {
+    while (cache->entry_count < kMaxHolidayEntries && pos < json + len) {
         // Find next date string "YYYY-MM-DD"
         snprintf(date_pattern, sizeof(date_pattern), "\"%04d-", year);
         const char* date_str = strstr(pos, date_pattern);
@@ -133,7 +136,7 @@ static bool ParseResponse(int year, const char* json, int len) {
         }
 
         // Store entry
-        HolidayEntry& e = s_cache.entries[s_cache.entry_count++];
+        HolidayEntry& e = cache->entries[cache->entry_count++];
         e.year = (int16_t)year;
         e.month = (int8_t)m;
         e.day = (int8_t)d;
@@ -143,16 +146,16 @@ static bool ParseResponse(int year, const char* json, int len) {
         pos = obj + 1;
     }
 
-    ESP_LOGI(kTag, "Parsed %d holiday entries for %d", s_cache.entry_count, year);
+    ESP_LOGI(kTag, "Parsed %d holiday entries for %d", cache->entry_count, year);
     return true;
 }
 
 /**
  * @brief Save cache to NVS using raw NVS blob API.
  */
-static void SaveCache() {
+static void SaveCache(const HolidayCache& cache) {
     char key[32];
-    snprintf(key, sizeof(key), "holiday_%d", s_cache.year);
+    snprintf(key, sizeof(key), "holiday_%d", cache.year);
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
@@ -162,17 +165,17 @@ static void SaveCache() {
     }
 
     // Serialize: entry_count (int) + entries array
-    int blob_size = sizeof(int) + s_cache.entry_count * sizeof(HolidayEntry);
+    int blob_size = sizeof(int) + cache.entry_count * sizeof(HolidayEntry);
     if (blob_size > 4000) {  // NVS blob limit
         nvs_close(handle);
         return;
     }
 
     uint8_t blob[4096];
-    memcpy(blob, &s_cache.entry_count, sizeof(int));
-    if (s_cache.entry_count > 0) {
-        memcpy(blob + sizeof(int), s_cache.entries,
-               s_cache.entry_count * sizeof(HolidayEntry));
+    memcpy(blob, &cache.entry_count, sizeof(int));
+    if (cache.entry_count > 0) {
+        memcpy(blob + sizeof(int), cache.entries,
+               cache.entry_count * sizeof(HolidayEntry));
     }
 
     err = nvs_set_blob(handle, key, blob, blob_size);
@@ -182,7 +185,7 @@ static void SaveCache() {
     if (err != ESP_OK) {
         ESP_LOGE(kTag, "NVS save failed: %s", esp_err_to_name(err));
     } else {
-        ESP_LOGI(kTag, "Saved %d entries for %d to NVS", s_cache.entry_count, s_cache.year);
+        ESP_LOGI(kTag, "Saved %d entries for %d to NVS", cache.entry_count, cache.year);
     }
     nvs_close(handle);
 }
@@ -190,7 +193,8 @@ static void SaveCache() {
 /**
  * @brief Load cache for a year from NVS.
  */
-static bool LoadCache(int year) {
+static bool LoadCache(int year, HolidayCache* cache) {
+    if (!cache) return false;
     char key[32];
     snprintf(key, sizeof(key), "holiday_%d", year);
 
@@ -224,16 +228,33 @@ static bool LoadCache(int year) {
     int expected = (int)sizeof(int) + count * (int)sizeof(HolidayEntry);
     if ((int)blob_size < expected) return false;
 
-    s_cache.year = year;
-    s_cache.entry_count = count;
+    cache->year = year;
+    cache->entry_count = count;
     if (count > 0) {
-        memcpy(s_cache.entries, blob + sizeof(int),
+        memcpy(cache->entries, blob + sizeof(int),
                count * sizeof(HolidayEntry));
     }
 
     ESP_LOGI(kTag, "Loaded %d cached entries for %d", count, year);
-    s_loaded = true;
     return true;
+}
+
+static int FindCacheIndex(int year) {
+    for (int i = 0; i < kCacheSlots; ++i) {
+        if (s_loaded[i] && s_caches[i].year == year) return i;
+    }
+    return -1;
+}
+
+static int AcquireCacheIndex(int year) {
+    const int existing = FindCacheIndex(year);
+    if (existing >= 0) return existing;
+
+    for (int i = 0; i < kCacheSlots; ++i) {
+        if (!s_loaded[i]) return i;
+    }
+
+    return s_caches[0].year <= s_caches[1].year ? 0 : 1;
 }
 
 // ============================================================
@@ -247,11 +268,10 @@ bool Init() {
     localtime_r(&now, &tm_buf);
     int year = tm_buf.tm_year + 1900;
 
-    s_loaded = LoadCache(year);
-    // Also try to load next year
-    LoadCache(year + 1);
+    s_loaded[0] = LoadCache(year, &s_caches[0]);
+    s_loaded[1] = LoadCache(year + 1, &s_caches[1]);
 
-    return s_loaded;
+    return s_loaded[0] || s_loaded[1];
 }
 
 bool Fetch(int year) {
@@ -295,21 +315,27 @@ bool Fetch(int year) {
     s_resp_buf[s_resp_len] = '\0';
     ESP_LOGI(kTag, "Received %d bytes", s_resp_len);
 
-    if (!ParseResponse(year, s_resp_buf, s_resp_len)) {
+    HolidayCache parsed = {};
+    if (!ParseResponse(year, s_resp_buf, s_resp_len, &parsed)) {
         ESP_LOGE(kTag, "Failed to parse response");
         return false;
     }
 
-    s_loaded = true;
-    SaveCache();
+    const int cache_index = AcquireCacheIndex(year);
+    s_caches[cache_index] = parsed;
+    s_loaded[cache_index] = true;
+    SaveCache(s_caches[cache_index]);
     return true;
 }
 
 static const HolidayEntry* FindEntry(int year, int month, int day) {
-    if (!s_loaded) return nullptr;
-    for (int i = 0; i < s_cache.entry_count; i++) {
-        const HolidayEntry& e = s_cache.entries[i];
-        if (e.year == year && e.month == month && e.day == day) {
+    const int cache_index = FindCacheIndex(year);
+    if (cache_index < 0) return nullptr;
+
+    const HolidayCache& cache = s_caches[cache_index];
+    for (int i = 0; i < cache.entry_count; i++) {
+        const HolidayEntry& e = cache.entries[i];
+        if (e.month == month && e.day == day) {
             return &e;
         }
     }

@@ -2,8 +2,10 @@
 #define _APPLICATION_H_
 
 #include <atomic>
+#include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string_view>
 
 #include "audio_service.h"
@@ -54,10 +56,14 @@ private:
 
     std::atomic<DeviceState> state_{kDeviceStateUnknown};
     std::atomic<bool> wifi_connected_{false};
+    std::mutex scheduled_tasks_mutex_;
+    std::deque<std::function<void()>> scheduled_tasks_;
     AudioService audio_service_;
     std::unique_ptr<ui::RawDrawUiManager> rawdraw_ui_manager_;
     esp_timer_handle_t sleep_timer_ = nullptr;
 
+    void PumpScheduledTasks();
+    void UpdateStatusBarForUiOnMainLoop();
     void ArmSyncSleepTimer();
     void EnterScheduledSleep();
     void EnterManualSleep();

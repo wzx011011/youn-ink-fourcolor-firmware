@@ -254,6 +254,7 @@ RawDrawUiManager::RawDrawUiManager()
     screenshot_renderer_ = std::make_unique<rawdraw::ScreenshotRenderer>();
     ap_transfer_server_->SetStateCallback(
         [this](rawdraw::ApTransferServer::ServerState state, const std::string& message) {
+            PostUiTask([this, state, message]() {
             if (!ap_transfer_renderer_) return;
             bool should_refresh = false;
             switch (state) {
@@ -295,34 +296,41 @@ RawDrawUiManager::RawDrawUiManager()
                 // stuck showing an obsolete slow-refresh status.
                 RequestActivePageRefresh();
             }
+            });
         });
     ap_transfer_server_->SetImageReceivedCallback([this](const char*) {
-        if (photo_gallery_renderer_) {
-            photo_gallery_renderer_->RefreshPhotoList();
-            const int count = photo_gallery_renderer_->GetPhotoCount();
-            if (count > 0) {
-                photo_gallery_renderer_->SetSelectedIndex(count - 1);
+        PostUiTask([this]() {
+            if (photo_gallery_renderer_) {
+                photo_gallery_renderer_->RefreshPhotoList();
+                const int count = photo_gallery_renderer_->GetPhotoCount();
+                if (count > 0) {
+                    photo_gallery_renderer_->SetSelectedIndex(count - 1);
+                }
             }
-        }
+        });
     });
     ap_transfer_server_->SetSettingsChangedCallback([this](int slideshow_interval_minutes) {
-        SetGallerySlideshowIntervalMinutes(slideshow_interval_minutes);
-        UpdateSettingsItem(3, slideshow_interval_minutes <= 0
-            ? std::string("关闭")
-            : std::to_string(slideshow_interval_minutes) + "min");
-        RequestActivePageRefresh();
+        PostUiTask([this, slideshow_interval_minutes]() {
+            SetGallerySlideshowIntervalMinutes(slideshow_interval_minutes);
+            UpdateSettingsItem(3, slideshow_interval_minutes <= 0
+                ? std::string("关闭")
+                : std::to_string(slideshow_interval_minutes) + "min");
+            RequestActivePageRefresh();
+        });
     });
     ap_transfer_server_->SetPhotosChangedCallback([this]() {
-        if (photo_gallery_renderer_) {
-            photo_gallery_renderer_->RefreshPhotoList();
-        }
+        PostUiTask([this]() {
+            if (photo_gallery_renderer_) {
+                photo_gallery_renderer_->RefreshPhotoList();
+            }
+        });
     });
     ap_transfer_server_->SetShowPhotoCallback([this](const std::string& photo_id) {
-        return ShowPhotoById(photo_id);
+        return PostUiTask([this, photo_id]() { ShowPhotoById(photo_id); });
     });
     // Web remote-control: switch page + list pages
     ap_transfer_server_->SetSwitchPageCallback([this](const std::string& page_id) {
-        return SwitchPageById(page_id);
+        return PostUiTask([this, page_id]() { SwitchPageById(page_id); });
     });
     ap_transfer_server_->SetPageListCallback([this]() {
         return GetPageListJson();
@@ -332,7 +340,7 @@ RawDrawUiManager::RawDrawUiManager()
     ap_transfer_server_->SetScreenshotCallback(
         [this](const std::string& label, const uint8_t* data, uint32_t size,
                int w, int h, bool is_2bpp) {
-            return SetScreenshot(label, data, size, w, h, is_2bpp);
+            return QueueScreenshot(label, data, size, w, h, is_2bpp);
         });
 
     // Initialize status bar defaults
@@ -363,6 +371,28 @@ RawDrawUiManager::~RawDrawUiManager() {
         gallery_slideshow_timer_ = nullptr;
     }
     ESP_LOGI(kTag, "RawDraw UI Manager destroyed");
+}
+
+bool RawDrawUiManager::PostUiTask(std::function<void()>&& task) {
+    if (!task) return false;
+    std::lock_guard<std::mutex> lock(ui_tasks_mutex_);
+    if (ui_tasks_.size() >= 32) {
+        ESP_LOGW(kTag, "UI task queue full; dropping callback");
+        return false;
+    }
+    ui_tasks_.push_back(std::move(task));
+    return true;
+}
+
+void RawDrawUiManager::PumpUiTasks() {
+    std::deque<std::function<void()>> tasks;
+    {
+        std::lock_guard<std::mutex> lock(ui_tasks_mutex_);
+        tasks.swap(ui_tasks_);
+    }
+    for (auto& task : tasks) {
+        task();
+    }
 }
 
 // ============================================================
@@ -1347,15 +1377,13 @@ rawdraw::Rect RawDrawUiManager::GetQuickSwitchBounds() const {
 
 void RawDrawUiManager::SnapshotQuickSwitchBacking(uint8_t* fb) {
     if (!fb || width_ <= 0 || height_ <= 0) return;
-    const size_t bytes_per_row = static_cast<size_t>((width_ + 7) / 8);
-    const size_t frame_bytes = bytes_per_row * static_cast<size_t>(height_);
+    const size_t frame_bytes = rawdraw::FramebufferSize(width_, height_);
     quick_switch_backing_.assign(fb, fb + frame_bytes);
 }
 
 void RawDrawUiManager::RestoreQuickSwitchBacking(uint8_t* fb) {
     if (!fb || quick_switch_backing_.empty()) return;
-    const size_t bytes_per_row = static_cast<size_t>((width_ + 7) / 8);
-    const size_t frame_bytes = bytes_per_row * static_cast<size_t>(height_);
+    const size_t frame_bytes = rawdraw::FramebufferSize(width_, height_);
     if (quick_switch_backing_.size() != frame_bytes) return;
     memcpy(fb, quick_switch_backing_.data(), frame_bytes);
     quick_switch_backing_.clear();
@@ -1424,21 +1452,18 @@ void RawDrawUiManager::RequestActivePageRefresh() {
 }
 
 void RawDrawUiManager::UpdateWeather(const WeatherData& data) {
-    // May be invoked from the weather_api esp_timer task, so we must not touch
-    // the framebuffer here. Update both weather renderers' cached data, then
-    // request an async refresh; the main loop will re-render if visible.
-    if (weather_renderer_) {
-        weather_renderer_->Update(data);
-    }
-    if (weather_detail_renderer_) {
-        weather_detail_renderer_->Update(data);
-    }
-    // Only request a redraw if a weather page is currently visible, to avoid
-    // needless refreshes while the user is on another page.
-    if (current_page_ == RawDrawPageId::Weather ||
-        current_page_ == RawDrawPageId::WeatherDetail) {
-        active_page_refresh_pending_.store(true, std::memory_order_release);
-    }
+    PostUiTask([this, data]() {
+        if (weather_renderer_) {
+            weather_renderer_->Update(data);
+        }
+        if (weather_detail_renderer_) {
+            weather_detail_renderer_->Update(data);
+        }
+        if (current_page_ == RawDrawPageId::Weather ||
+            current_page_ == RawDrawPageId::WeatherDetail) {
+            active_page_refresh_pending_.store(true, std::memory_order_release);
+        }
+    });
 }
 
 // Stable string ids for the web remote-control API. Keep these in sync with
@@ -1495,6 +1520,15 @@ bool RawDrawUiManager::SetScreenshot(const std::string& label, const uint8_t* da
         RequestActivePageRefresh();
     }
     return true;
+}
+
+bool RawDrawUiManager::QueueScreenshot(const std::string& label, const uint8_t* data,
+                                       uint32_t size, int w, int h, bool is_2bpp) {
+    if (!data || size == 0) return false;
+    std::vector<uint8_t> image(data, data + size);
+    return PostUiTask([this, label, image = std::move(image), w, h, is_2bpp]() {
+        SetScreenshot(label, image.data(), static_cast<uint32_t>(image.size()), w, h, is_2bpp);
+    });
 }
 
 std::string RawDrawUiManager::GetPageListJson() const {

@@ -16,7 +16,7 @@ the 400x300 panel. Not as flexible as CSS, but the only way to get clean text.
 """
 
 import logging
-from PIL import Image, ImageDraw, ImageFont, ImageChops
+from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -52,25 +52,30 @@ class PilBoardRenderer:
     def render(self, draw_fn):
         """Run a draw function that paints onto a fresh canvas.
 
-        draw_fn(draw_rgb, draw_text, fonts) - the board's layout code.
-          draw_rgb: ImageDraw on the RGB color layer
-          draw_text: ImageDraw on the 1-bit text layer (use fill=0 for black)
+        draw_fn(draw_rgb, draw_text, draw_red, fonts) - the board's layout code.
+          draw_rgb: ImageDraw on the RGB color layer (blocks, lines, icons)
+          draw_text: ImageDraw on the 1-bit black text layer (fill=0)
+          draw_red: ImageDraw on the 1-bit red text layer (fill=0) — same
+                    hard-edge glyphs, composited as pure red. Use for
+                    semantic accents (涨、忌、警告), not decoration.
           fonts: callable(size) -> ImageFont
         Returns the composited RGB image.
         """
         rgb = Image.new("RGB", (SCREEN_W, SCREEN_H), C_WHITE)
         text = Image.new("1", (SCREEN_W, SCREEN_H), 1)  # 1=white(background)
+        red = Image.new("1", (SCREEN_W, SCREEN_H), 1)
         draw_rgb = ImageDraw.Draw(rgb)
         draw_text = ImageDraw.Draw(text)
+        draw_red = ImageDraw.Draw(red)
 
-        draw_fn(draw_rgb, draw_text, self._font)
+        draw_fn(draw_rgb, draw_text, draw_red, self._font)
 
-        # Composite: where text layer is 0 (black text), paint black on RGB.
-        # Convert 1-bit text to "L" mask first (255 where text=0, 0 where bg=1),
-        # because ImageChops.invert doesn't work on "1" mode images.
-        mask = text.convert("L").point(lambda v: 255 - v)
-        black = Image.new("RGB", (SCREEN_W, SCREEN_H), C_BLACK)
-        rgb.paste(black, mask=mask)
+        # Composite each 1-bit text layer through an "L" mask (255 where the
+        # glyph is, 0 elsewhere) so glyph edges stay hard — no AA grey that
+        # would dither into speckle on the panel.
+        for layer, color in ((text, C_BLACK), (red, C_RED)):
+            mask = layer.convert("L").point(lambda v: 255 - v)
+            rgb.paste(Image.new("RGB", (SCREEN_W, SCREEN_H), color), mask=mask)
         return rgb
 
 
@@ -97,3 +102,67 @@ def _find_font():
 
 # Singleton
 pil_renderer = PilBoardRenderer()
+
+
+# ============================================================
+# Shared text helpers — measure by PIXELS, never by char count.
+# CJK glyphs are ~1em wide but latin/digits/punctuation are not,
+# so `text[:N]` overflows. These helpers are the fix.
+# ============================================================
+
+def text_w(draw, text, font):
+    """Pixel width of text in the given font."""
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0]
+
+
+def draw_centered(draw, text, font, cx, y, fill=0):
+    """Draw text horizontally centered at cx (y = top)."""
+    w = text_w(draw, text, font)
+    draw.text((cx - w // 2, y), text, font=font, fill=fill)
+
+
+def fit_text(draw, text, font, max_w):
+    """Truncate text (with … ) so it fits max_w pixels. Pixel-accurate."""
+    if text_w(draw, text, font) <= max_w:
+        return text
+    ell = "…"
+    ell_w = text_w(draw, ell, font)
+    out = []
+    w = 0
+    for ch in text:
+        cw = text_w(draw, ch, font)
+        if w + cw + ell_w > max_w:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + ell if out else ell
+
+
+def wrap_text(draw, text, font, max_w, max_lines=2):
+    """Greedy pixel-based wrap into at most max_lines lines.
+
+    If text doesn't fit, the last line is truncated with … .
+    Returns a list of line strings.
+    """
+    lines = []
+    cur = []
+    cur_w = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        cw = text_w(draw, ch, font)
+        if cur and cur_w + cw > max_w:
+            lines.append("".join(cur))
+            if len(lines) == max_lines - 1:
+                # Last allowed line: fit everything that's left, truncated.
+                lines.append(fit_text(draw, text[i:], font, max_w))
+                return lines
+            cur, cur_w = [], 0
+            continue
+        cur.append(ch)
+        cur_w += cw
+        i += 1
+    if cur:
+        lines.append("".join(cur))
+    return lines

@@ -45,6 +45,7 @@
 #include <cstdint>
 #include <array>
 #include <atomic>
+#include <deque>
 #include <vector>
 #include <mutex>
 
@@ -118,7 +119,7 @@ using PageSwitchCallback = std::function<void(RawDrawPageId page)>;
  * - Draws the status bar + active page content
  * - Provides data update methods for each page
  *
- * Unlike the LVGL UiManager, this operates directly on the 1bpp framebuffer.
+ * Unlike the LVGL UiManager, this operates directly on the 2bpp framebuffer.
  * No LVGL objects, no tabview, no display driver — just raw pixels.
  */
 class RawDrawUiManager {
@@ -158,8 +159,13 @@ public:
     /**
      * @brief Get the current active page
      */
-    RawDrawPageId GetCurrentPage() const { return current_page_; }
+    RawDrawPageId GetCurrentPage() const { return current_page_.load(std::memory_order_acquire); }
     bool IsDisplayRefreshPending() const;
+
+    // Cross-task entry point. HTTP, network and timer callbacks must post work
+    // here; renderer state and framebuffer writes stay on Application::Run().
+    bool PostUiTask(std::function<void()>&& task);
+    void PumpUiTasks();
 
     /**
      * @brief Get the active page renderer (may be null)
@@ -448,11 +454,13 @@ private:
     int height_ = 300;
 
     // Current page
-    RawDrawPageId current_page_ = RawDrawPageId::Gallery;
+    std::atomic<RawDrawPageId> current_page_{RawDrawPageId::Gallery};
 
     // Status bar
     RawDrawStatusBarData status_bar_data_;
     mutable std::mutex ui_state_mutex_;
+    std::mutex ui_tasks_mutex_;
+    std::deque<std::function<void()>> ui_tasks_;
 
     // Page renderers (owned)
     std::unique_ptr<rawdraw::ChatRenderer> chat_renderer_;
@@ -529,6 +537,8 @@ private:
     void RestoreQuickSwitchBacking(uint8_t* fb);
     void RedrawQuickSwitchOnly(uint8_t* fb);
     void RefreshRect(const rawdraw::Rect& rect, bool urgent = false);
+    bool QueueScreenshot(const std::string& label, const uint8_t* data,
+                         uint32_t size, int w, int h, bool is_2bpp);
     static const std::array<QuickSwitchItem, 11>& GetQuickSwitchItems();
     void MarkAllRenderersFullRefresh();
 };

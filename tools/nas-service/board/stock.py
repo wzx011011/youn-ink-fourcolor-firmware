@@ -14,6 +14,7 @@ from datetime import datetime
 
 from board.pil_renderer import (
     pil_renderer, C_BLACK, C_WHITE, C_RED, C_YELLOW, SCREEN_W, SCREEN_H,
+    text_w, draw_centered,
 )
 
 # 腾讯指数接口(三大指数)
@@ -145,17 +146,17 @@ def _draw_sparkline(draw_rgb, points, x, y, w, h, color):
 
 
 def render_dashboard(data: dict):
-    """焦点版(方案A,克制用色):上证巨型+走势线(唯一红色),次级指数纯黑箭头。"""
+    """焦点版:上证巨型+走势线,涨红跌黑,次级指数底栏。"""
 
-    def layout(draw_rgb, draw_text, font):
+    def layout(draw_rgb, draw_text, draw_red, font):
         f48 = font(48)
         f24 = font(24)
         f16 = font(16)
         pad = 24
 
         if not data.get("ok") or not data.get("indices"):
-            _draw_centered(draw_text, "暂无行情", f24,
-                           SCREEN_W // 2, SCREEN_H // 2 - 12, fill=0)
+            draw_centered(draw_text, "暂无行情", f24,
+                          SCREEN_W // 2, SCREEN_H // 2 - 12, fill=0)
             return
 
         indices = data["indices"]
@@ -167,113 +168,104 @@ def render_dashboard(data: dict):
             draw_text.text((pad, 14), main["name"], font=f24, fill=0)
         status = "●交易中" if data.get("is_trading") else "○已收盘"
         corner = f"{data.get('now_time','')} {status}"
-        cw = _text_w(draw_text, corner, f16)
+        cw = text_w(draw_text, corner, f16)
         draw_text.text((SCREEN_W - pad - cw, 18), corner, font=f16, fill=0)
 
-        # ===== 焦点:上证点位(48px)+ 涨跌(纯黑箭头+数字,不用色块)=====
+        # ===== 焦点:上证点位(48px)+ 涨跌(涨红跌黑)=====
         if main:
             price_str = f"{main['price']:.2f}"
-            draw_text.text((pad, 56), price_str, font=f48, fill=0)
-            # 涨跌:黑色箭头+数字(红块太重,改纯文字)
+            draw_text.text((pad, 52), price_str, font=f48, fill=0)
             pct = main["change_pct"]
             arrow = "▲" if pct >= 0 else "▼"
             sign = "+" if pct >= 0 else ""
             pct_str = f"{arrow} {sign}{pct:.2f}%"
-            draw_text.text((pad, 112), pct_str, font=f24, fill=0)
+            pct_draw = draw_red if pct >= 0 else draw_text
+            pct_draw.text((pad, 110), pct_str, font=f24, fill=0)
 
-        # ===== 走势线(唯一的红色装饰,视觉焦点)=====
+        # ===== 走势线(涨红跌黑,视觉焦点)=====
         spark = data.get("sparkline", [])
         if spark and len(spark) > 2:
-            # 走势线用红色(涨)或黑色(跌),加粗3px
             main_pct = main["change_pct"] if main else 0
             line_color = C_RED if main_pct >= 0 else C_BLACK
-            _draw_sparkline(draw_rgb, spark, pad, 150, SCREEN_W - pad * 2, 50,
+            _draw_sparkline(draw_rgb, spark, pad, 148, SCREEN_W - pad * 2, 52,
                             line_color)
         else:
-            # 没有走势数据时,画一条提示
             draw_text.text((pad, 165), "（走势数据获取中）", font=f16, fill=0)
 
-        # ===== 底部:次级指数(纯黑,无色块,简洁)=====
+        # ===== 底部:次级指数(竖线分栏)=====
         draw_rgb.line([(pad, 214), (SCREEN_W - pad, 214)], fill=C_BLACK, width=1)
         if subs:
             col_w = (SCREEN_W - pad * 2) // len(subs)
             for i, idx in enumerate(subs):
                 cx = pad + col_w * i
-                # 名称(小字)
-                draw_text.text((cx, 224), idx["name"], font=f16, fill=0)
-                # 点位
-                draw_text.text((cx, 244), f"{idx['price']:.2f}", font=f24, fill=0)
-                # 涨跌:黑色箭头(无色块)
+                if i > 0:
+                    draw_rgb.line([(cx - 8, 224), (cx - 8, 288)],
+                                  fill=C_BLACK, width=1)
+                draw_text.text((cx, 226), idx["name"], font=f16, fill=0)
+                draw_text.text((cx, 250), f"{idx['price']:.2f}", font=f24, fill=0)
                 pct = idx["change_pct"]
                 arrow = "▲" if pct >= 0 else "▼"
                 sign = "+" if pct >= 0 else ""
                 pct_str = f"{arrow}{sign}{pct:.2f}%"
-                pww = _text_w(draw_text, pct_str, f16)
-                draw_text.text((cx + col_w - pww - 4, 224), pct_str, font=f16, fill=0)
+                pww = text_w(draw_text, pct_str, f16)
+                pct_draw = draw_red if pct >= 0 else draw_text
+                pct_draw.text((cx + col_w - pww - 12, 230), pct_str,
+                              font=f16, fill=0)
 
     return pil_renderer.render(layout)
 
 
 # ============================================================
-# Template 2: simple — only 3 indices, big
+# Template 2: simple — 3 indices as a clean table
 # ============================================================
 
 def render_simple(data: dict):
-    """简洁版:只三大指数,大字居中。屏保式。"""
+    """简洁版:三大指数三行表(名称 | 点位 | 涨跌幅),涨红跌黑。"""
 
-    def layout(draw_rgb, draw_text, font):
-        f48 = font(48)
+    def layout(draw_rgb, draw_text, draw_red, font):
         f24 = font(24)
         f16 = font(16)
         pad = 20
 
         if not data.get("ok") or not data.get("indices"):
-            _draw_centered(draw_text, "暂无行情", f24,
-                           SCREEN_W // 2, SCREEN_H // 2 - 12, fill=0)
+            draw_centered(draw_text, "暂无行情", f24,
+                          SCREEN_W // 2, SCREEN_H // 2 - 12, fill=0)
             return
 
-        # 顶部
-        draw_text.text((pad, 12), "📈 A股三大指数", font=f24, fill=0)
-        w = _text_w(draw_text, data.get("now_time", ""), f16)
-        draw_text.text((SCREEN_W - pad - w, 16),
-                       data.get("now_time", ""), font=f16, fill=0)
-        draw_rgb.line([(pad, 48), (SCREEN_W - pad, 48)], fill=C_RED, width=2)
+        # 顶部:红色方块 + 标题 + 时间
+        draw_rgb.rectangle([pad, 16, pad + 18, 34], fill=C_RED)
+        draw_text.text((pad + 26, 12), "A股三大指数", font=f24, fill=0)
+        tm = data.get("now_time", "")
+        w = text_w(draw_text, tm, f16)
+        draw_text.text((SCREEN_W - pad - w, 18), tm, font=f16, fill=0)
+        draw_rgb.line([(pad, 46), (SCREEN_W - pad, 46)], fill=C_RED, width=2)
 
-        # 三大指数居中排列
+        # 三行表:行高均分,行内垂直居中
         indices = data["indices"][:3]
-        cx = SCREEN_W // 2
-        y = 68
-        spacing = 70
-        for idx in indices:
-            # 名称(24px)
-            _draw_centered(draw_text, idx["name"], f24, cx, y, fill=0)
-            # 点位(48px大字)
+        top, bottom = 54, SCREEN_H - 8
+        row_h = (bottom - top) // len(indices)
+        price_right = 256     # 点位右对齐边界
+        pct_right = SCREEN_W - pad
+        for i, idx in enumerate(indices):
+            y = top + i * row_h
+            ty = y + (row_h - 28) // 2
+            # 名称(左)
+            draw_text.text((pad, ty), idx["name"], font=f24, fill=0)
+            # 点位(右对齐到 price_right)
             price_str = f"{idx['price']:.2f}"
-            _draw_centered(draw_text, price_str, f48, cx, y + 26, fill=0)
-            # 涨跌幅(红块白字 / 纯黑)
+            pw = text_w(draw_text, price_str, f24)
+            draw_text.text((price_right - pw, ty), price_str, font=f24, fill=0)
+            # 涨跌幅(右对齐,涨红跌黑)
             pct = idx["change_pct"]
+            arrow = "▲" if pct >= 0 else "▼"
             sign = "+" if pct >= 0 else ""
-            pct_str = f"{sign}{pct:.2f}%"
-            pww = _text_w(draw_text, pct_str, f24)
-            pct_x = cx - pww // 2
-            pct_y = y + 26 + 48 + 2
-            if pct >= 0:
-                draw_rgb.rectangle([pct_x - 6, pct_y - 2,
-                                    pct_x + pww + 6, pct_y + 24], fill=C_RED)
-                draw_text.text((pct_x, pct_y), pct_str, font=f24, fill=1)
-            else:
-                _draw_centered(draw_text, pct_str, f24, cx, pct_y, fill=0)
-            y += spacing
+            pct_str = f"{arrow}{sign}{pct:.2f}%"
+            pww = text_w(draw_text, pct_str, f24)
+            pct_draw = draw_red if pct >= 0 else draw_text
+            pct_draw.text((pct_right - pww, ty), pct_str, font=f24, fill=0)
+            # 行分隔线
+            if i < len(indices) - 1:
+                draw_rgb.line([(pad, y + row_h), (SCREEN_W - pad, y + row_h)],
+                              fill=C_BLACK, width=1)
 
     return pil_renderer.render(layout)
-
-
-# Shared helpers
-def _text_w(draw, text, f):
-    bbox = draw.textbbox((0, 0), text, font=f)
-    return bbox[2] - bbox[0]
-
-
-def _draw_centered(draw, text, font, cx, y, fill):
-    w = _text_w(draw, text, font)
-    draw.text((cx - w // 2, y), text, font=font, fill=fill)

@@ -72,3 +72,6 @@ tools/compare_*.png
 tools/prev_*.png
 tools/user_image.jpg
 tools/*.jpg
+
+# 模板渲染预览产物
+tools/_previews/

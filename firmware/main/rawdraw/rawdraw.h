@@ -23,6 +23,18 @@
 
 namespace rawdraw {
 
+// The RawDraw surface is always packed 2bpp: four pixels per byte.
+// Keep sizing here so display code and UI helpers cannot diverge on stride.
+constexpr int kFramebufferBitsPerPixel = 2;
+
+constexpr int FramebufferBytesPerRow(int width) {
+    return width > 0 ? (width * kFramebufferBitsPerPixel + 7) / 8 : 0;
+}
+
+constexpr size_t FramebufferSize(int width, int height) {
+    return height > 0 ? static_cast<size_t>(FramebufferBytesPerRow(width)) * height : 0;
+}
+
 // ============================================================
 // Geometric Types
 // ============================================================

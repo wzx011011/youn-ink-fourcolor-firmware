@@ -25,6 +25,11 @@
 #include <cJSON.h>
 #include <cstring>
 #include <cstdio>
+#include <atomic>
+#include <mutex>
+#include <utility>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 static const char* kTag = "WeatherApi";
 
@@ -35,10 +40,13 @@ static const char* kTag = "WeatherApi";
 static char s_api_key[64] = {0};
 static char s_city_code[16] = {0};
 static WeatherCallback s_callback;
-static bool s_initialized = false;
-static bool s_in_progress = false;
+static std::mutex s_state_mutex;
+static std::atomic<bool> s_initialized{false};
+static std::atomic<bool> s_in_progress{false};
+static std::atomic<bool> s_fetch_pending{false};
 static WeatherData s_last_data;
 static esp_timer_handle_t s_timer = nullptr;
+static TaskHandle_t s_worker_task = nullptr;
 
 // ============================================================
 // Weather icon mapping
@@ -312,32 +320,46 @@ static bool HttpGet(const char* url) {
     return true;
 }
 
-static void DoFetch(void* arg) {
-    (void)arg;
-    if (!s_initialized || s_in_progress) return;
+static void DoFetch() {
+    if (!s_initialized.load(std::memory_order_acquire)) return;
 
-    if (!s_api_key[0] || !s_city_code[0]) {
-        ESP_LOGE(kTag, "API key or city code not set");
+    bool expected = false;
+    if (!s_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         return;
     }
 
-    s_in_progress = true;
+    char api_key[sizeof(s_api_key)] = {};
+    char city_code[sizeof(s_city_code)] = {};
+    WeatherCallback callback;
+    {
+        std::lock_guard<std::mutex> lock(s_state_mutex);
+        strlcpy(api_key, s_api_key, sizeof(api_key));
+        strlcpy(city_code, s_city_code, sizeof(city_code));
+        callback = s_callback;
+    }
+
+    if (!api_key[0] || !city_code[0]) {
+        ESP_LOGE(kTag, "API key or city code not set");
+        s_in_progress.store(false, std::memory_order_release);
+        return;
+    }
+
     WeatherData data;
 
     char url[256];
     snprintf(url, sizeof(url),
              "https://devapi.qweather.com/v7/weather/now?key=%s&location=%s",
-             s_api_key, s_city_code);
+             api_key, city_code);
     ESP_LOGI(kTag, "Fetching current weather: %s", url);
     if (!HttpGet(url) || !ParseNowJson(s_response_buf, &data)) {
         ESP_LOGE(kTag, "Failed to fetch or parse current weather");
-        s_in_progress = false;
+        s_in_progress.store(false, std::memory_order_release);
         return;
     }
 
     snprintf(url, sizeof(url),
              "https://devapi.qweather.com/v7/weather/3d?key=%s&location=%s",
-             s_api_key, s_city_code);
+             api_key, city_code);
     ESP_LOGI(kTag, "Fetching forecast: %s", url);
     if (!HttpGet(url) || !ParseForecastJson(s_response_buf, &data)) {
         ESP_LOGW(kTag, "Failed to fetch or parse 3-day forecast");
@@ -345,33 +367,64 @@ static void DoFetch(void* arg) {
 
     snprintf(url, sizeof(url),
              "https://devapi.qweather.com/v7/air/now?key=%s&location=%s",
-             s_api_key, s_city_code);
+             api_key, city_code);
     ESP_LOGI(kTag, "Fetching air quality: %s", url);
     if (!HttpGet(url) || !ParseAirJson(s_response_buf, &data)) {
         ESP_LOGW(kTag, "Failed to fetch or parse air quality");
     }
 
-    s_last_data = data;
+    {
+        std::lock_guard<std::mutex> lock(s_state_mutex);
+        s_last_data = data;
+    }
     ESP_LOGI(kTag, "Weather: %s %s°C AQI=%d forecast=%d",
              data.weather_text.c_str(),
              data.temp.c_str(),
              data.air_aqi,
              static_cast<int>(data.forecast.size()));
 
-    if (s_callback) {
-        s_callback(data);
+    if (callback) {
+        callback(data);
     }
 
-    s_in_progress = false;
+    s_in_progress.store(false, std::memory_order_release);
 }
 
 // ============================================================
-// Timer callback
+// Background worker and timer callback
 // ============================================================
 
+static void WeatherWorker(void*) {
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        s_fetch_pending.store(false, std::memory_order_release);
+        DoFetch();
+    }
+}
+
+static bool RequestFetch() {
+    if (!s_initialized.load(std::memory_order_acquire) ||
+        s_in_progress.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    bool expected = false;
+    if (!s_fetch_pending.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return false;
+    }
+
+    if (s_worker_task == nullptr) {
+        s_fetch_pending.store(false, std::memory_order_release);
+        return false;
+    }
+    xTaskNotifyGive(s_worker_task);
+    return true;
+}
+
 static void TimerCallback(void* arg) {
+    (void)arg;
     ESP_LOGD(kTag, "Hourly weather refresh triggered");
-    DoFetch(arg);
+    RequestFetch();
 }
 
 // ============================================================
@@ -379,14 +432,22 @@ static void TimerCallback(void* arg) {
 // ============================================================
 
 void weather_api_init(const char* api_key, const char* city_code, WeatherCallback callback) {
-    if (s_initialized) {
-        ESP_LOGW(kTag, "Already initialized");
-        return;
+    {
+        std::lock_guard<std::mutex> lock(s_state_mutex);
+        if (s_initialized.load(std::memory_order_acquire)) {
+            ESP_LOGW(kTag, "Already initialized");
+            return;
+        }
+        strlcpy(s_api_key, api_key ? api_key : "", sizeof(s_api_key));
+        strlcpy(s_city_code, city_code ? city_code : "", sizeof(s_city_code));
+        s_callback = std::move(callback);
     }
 
-    strncpy(s_api_key, api_key, sizeof(s_api_key) - 1);
-    strncpy(s_city_code, city_code, sizeof(s_city_code) - 1);
-    s_callback = callback;
+    if (xTaskCreate(&WeatherWorker, "weather_fetch", 8192, nullptr, 4, &s_worker_task) != pdPASS) {
+        ESP_LOGE(kTag, "Failed to create weather worker task");
+        s_worker_task = nullptr;
+        return;
+    }
 
     // Create hourly refresh timer
     esp_timer_create_args_t timer_args = {
@@ -405,24 +466,24 @@ void weather_api_init(const char* api_key, const char* city_code, WeatherCallbac
         ESP_LOGE(kTag, "Failed to create timer");
     }
 
-    s_initialized = true;
+    s_initialized.store(true, std::memory_order_release);
 
-    // Fetch immediately on init
-    DoFetch(nullptr);
+    // Fetch immediately on the dedicated worker, never on the timer task.
+    RequestFetch();
 
     ESP_LOGI(kTag, "Weather API initialized: city=%s", s_city_code);
 }
 
 bool weather_api_fetch_now() {
-    if (!s_initialized) return false;
-    if (s_in_progress) return false;
-
-    DoFetch(nullptr);
-    return true;
+    return RequestFetch();
 }
 
 void weather_api_set_city(const char* city_code) {
-    strncpy(s_city_code, city_code, sizeof(s_city_code) - 1);
+    if (!city_code) return;
+    {
+        std::lock_guard<std::mutex> lock(s_state_mutex);
+        strlcpy(s_city_code, city_code, sizeof(s_city_code));
+    }
     ESP_LOGI(kTag, "City changed to: %s", s_city_code);
 
     // Fetch new data for new city
@@ -430,7 +491,9 @@ void weather_api_set_city(const char* city_code) {
 }
 
 void weather_api_set_key(const char* api_key) {
-    strncpy(s_api_key, api_key, sizeof(s_api_key) - 1);
+    if (!api_key) return;
+    std::lock_guard<std::mutex> lock(s_state_mutex);
+    strlcpy(s_api_key, api_key, sizeof(s_api_key));
 }
 
 const char* weather_api_get_city() {
@@ -438,7 +501,7 @@ const char* weather_api_get_city() {
 }
 
 bool weather_api_is_ready() {
-    return s_initialized;
+    return s_initialized.load(std::memory_order_acquire);
 }
 
 const WeatherData* weather_api_get_last_data() {

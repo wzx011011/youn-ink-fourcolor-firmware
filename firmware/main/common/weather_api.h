@@ -84,7 +84,7 @@ using WeatherCallback = std::function<void(const WeatherData&)>;
 /**
  * @brief Initialize weather API client
  *
- * Sets up the hourly auto-refresh timer using esp_timer.
+ * Sets up hourly refresh notifications and a dedicated worker for HTTP work.
  *
  * @param api_key HeWeather API key
  * @param city_code City location ID (e.g., "101210101" for Hangzhou)
@@ -95,7 +95,7 @@ void weather_api_init(const char* api_key, const char* city_code, WeatherCallbac
 /**
  * @brief Trigger a manual weather data fetch
  *
- * @return true if request started, false if already in progress
+ * @return true if request was queued, false if a request is already pending or running
  */
 bool weather_api_fetch_now();
 

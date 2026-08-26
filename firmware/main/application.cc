@@ -147,7 +147,12 @@ void Application::Initialize() {
         ESP_LOGW(kTag, "Photo storage init failed");
     }
 
-    auto* lcd = static_cast<CustomLcdDisplay*>(display);
+    auto* lcd = dynamic_cast<CustomLcdDisplay*>(display);
+    if (lcd == nullptr) {
+        ESP_LOGE(kTag, "Board display does not provide the RawDraw framebuffer interface");
+        SetDeviceState(kDeviceStateFatalError);
+        return;
+    }
     rawdraw_ui_manager_ = std::make_unique<ui::RawDrawUiManager>();
     rawdraw_ui_manager_->Init(lcd, [lcd](const rawdraw::Rect&, bool urgent) {
         if (urgent) {
@@ -287,6 +292,7 @@ void Application::Initialize() {
 
     // Set up WiFi status callback to update StatusBar
     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
+        Schedule([this, event, data]() {
         switch (event) {
             case NetworkEvent::Connected:
                 ESP_LOGI(kTag, "WiFi connected: %s", data.c_str());
@@ -358,6 +364,7 @@ void Application::Initialize() {
                 UpdateStatusBarForUi();
                 break;
         }
+        });
     });
 
     // Start network (non-blocking, WiFi connects asynchronously)
@@ -367,79 +374,95 @@ void Application::Initialize() {
 }
 
 void Application::OnUpClick() {
-    ESP_LOGI(kTag, "UP click");
-    Board::GetInstance().FlashActivityLed();
-    if (rawdraw_ui_manager_) {
-        rawdraw_ui_manager_->HandleInput(rawdraw::ButtonEvent{rawdraw::ButtonEvent::kUpClick});
-    }
+    Schedule([this]() {
+        ESP_LOGI(kTag, "UP click");
+        Board::GetInstance().FlashActivityLed();
+        if (rawdraw_ui_manager_) {
+            rawdraw_ui_manager_->HandleInput(rawdraw::ButtonEvent{rawdraw::ButtonEvent::kUpClick});
+        }
+    });
 }
 
 void Application::OnDownClick() {
-    ESP_LOGI(kTag, "DOWN click");
-    Board::GetInstance().FlashActivityLed();
-    if (rawdraw_ui_manager_) {
-        rawdraw_ui_manager_->HandleInput(rawdraw::ButtonEvent{rawdraw::ButtonEvent::kDownClick});
-    }
+    Schedule([this]() {
+        ESP_LOGI(kTag, "DOWN click");
+        Board::GetInstance().FlashActivityLed();
+        if (rawdraw_ui_manager_) {
+            rawdraw_ui_manager_->HandleInput(rawdraw::ButtonEvent{rawdraw::ButtonEvent::kDownClick});
+        }
+    });
 }
 
 void Application::OnUpDoubleClick() {
     // Opens the Quick Switch overlay so the user can reach hidden pages
     // (weather / calendar / news / ebook / etc.). Previously the board layer
     // never wired OnDoubleClick, so this event was dead code.
-    ESP_LOGI(kTag, "UP double click");
-    if (rawdraw_ui_manager_) {
-        rawdraw_ui_manager_->HandleInput(
-            rawdraw::ButtonEvent{rawdraw::ButtonEvent::kUpDoubleClick});
-    }
+    Schedule([this]() {
+        ESP_LOGI(kTag, "UP double click");
+        if (rawdraw_ui_manager_) {
+            rawdraw_ui_manager_->HandleInput(
+                rawdraw::ButtonEvent{rawdraw::ButtonEvent::kUpDoubleClick});
+        }
+    });
 }
 
 void Application::OnUpLongPress() {
-    ESP_LOGI(kTag, "UP long press");
-    NoteButtonActivity();
-    if (rawdraw_ui_manager_ &&
-        rawdraw_ui_manager_->GetCurrentPage() == ui::RawDrawPageId::Settings) {
-        ESP_LOGI(kTag, "UP long press - leaving settings");
-        rawdraw_ui_manager_->SwitchPage(ui::RawDrawPageId::Gallery);
-    }
+    Schedule([this]() {
+        ESP_LOGI(kTag, "UP long press");
+        NoteButtonActivity();
+        if (rawdraw_ui_manager_ &&
+            rawdraw_ui_manager_->GetCurrentPage() == ui::RawDrawPageId::Settings) {
+            ESP_LOGI(kTag, "UP long press - leaving settings");
+            rawdraw_ui_manager_->SwitchPage(ui::RawDrawPageId::Gallery);
+        }
+    });
 }
 
 void Application::OnDownLongPress() {
-    ESP_LOGI(kTag, "DOWN long press");
-    NoteButtonActivity();
-    if (rawdraw_ui_manager_) {
-        ESP_LOGI(kTag, "DOWN long press - entering settings");
-        rawdraw_ui_manager_->SwitchPage(ui::RawDrawPageId::Settings);
-    }
+    Schedule([this]() {
+        ESP_LOGI(kTag, "DOWN long press");
+        NoteButtonActivity();
+        if (rawdraw_ui_manager_) {
+            ESP_LOGI(kTag, "DOWN long press - entering settings");
+            rawdraw_ui_manager_->SwitchPage(ui::RawDrawPageId::Settings);
+        }
+    });
 }
 
 void Application::OnWifiConfigComboLongPress() {
-    ESP_LOGI(kTag, "UP+DOWN long press");
-    NoteButtonActivity();
-    EnterWifiConfigMode();
+    Schedule([this]() {
+        ESP_LOGI(kTag, "UP+DOWN long press");
+        NoteButtonActivity();
+        EnterWifiConfigMode();
+    });
 }
 
 void Application::OnBootClick() {
-    ESP_LOGI(kTag, "BOOT click");
-    Board::GetInstance().FlashActivityLed();
-    if (rawdraw_ui_manager_) {
-        rawdraw_ui_manager_->HandleInput(rawdraw::ButtonEvent{rawdraw::ButtonEvent::kBootClick});
-    }
+    Schedule([this]() {
+        ESP_LOGI(kTag, "BOOT click");
+        Board::GetInstance().FlashActivityLed();
+        if (rawdraw_ui_manager_) {
+            rawdraw_ui_manager_->HandleInput(rawdraw::ButtonEvent{rawdraw::ButtonEvent::kBootClick});
+        }
+    });
 }
 
 void Application::OnBootLongPress() {
-    ESP_LOGI(kTag, "BOOT long press");
-    NoteButtonActivity();
-    if (WifiManager::GetInstance().IsConfigMode()) {
-        ESP_LOGI(kTag, "BOOT long press - exiting WiFi config AP");
-        if (rawdraw_ui_manager_) {
-            rawdraw_ui_manager_->SwitchPage(ui::RawDrawPageId::Gallery);
+    Schedule([this]() {
+        ESP_LOGI(kTag, "BOOT long press");
+        NoteButtonActivity();
+        if (WifiManager::GetInstance().IsConfigMode()) {
+            ESP_LOGI(kTag, "BOOT long press - exiting WiFi config AP");
+            if (rawdraw_ui_manager_) {
+                rawdraw_ui_manager_->SwitchPage(ui::RawDrawPageId::Gallery);
+            }
+            WifiManager::GetInstance().StartStation();
+            return;
         }
-        WifiManager::GetInstance().StartStation();
-        return;
-    }
-    if (rawdraw_ui_manager_) {
-        rawdraw_ui_manager_->HandleInput(rawdraw::ButtonEvent{rawdraw::ButtonEvent::kBootLongPress});
-    }
+        if (rawdraw_ui_manager_) {
+            rawdraw_ui_manager_->HandleInput(rawdraw::ButtonEvent{rawdraw::ButtonEvent::kBootLongPress});
+        }
+    });
 }
 
 void Application::NoteButtonActivity() {
@@ -474,7 +497,7 @@ void Application::StartOnlineDataServices() {
     if (s_online_task_started.exchange(true)) {
         return;  // already launched (or running)
     }
-    xTaskCreate([](void* arg) {
+    const BaseType_t task_created = xTaskCreate([](void* arg) {
         auto* self = static_cast<Application*>(arg);
 
 #if defined(CONFIG_HOLIDAY_FETCH_ENABLED) && CONFIG_HOLIDAY_FETCH_ENABLED
@@ -511,7 +534,7 @@ void Application::StartOnlineDataServices() {
             if (key != nullptr && key[0] != '\0' && city != nullptr && city[0] != '\0') {
                 ESP_LOGI(kTag, "Initializing QWeather (city=%s)", city);
                 weather_api_init(key, city, [self](const WeatherData& data) {
-                    // Invoked from weather_api's esp_timer task ~once per hour.
+                    // Weather owns its network worker; this only posts the UI data update.
                     if (self->GetRawDrawUiManager()) {
                         self->GetRawDrawUiManager()->UpdateWeather(data);
                     }
@@ -523,6 +546,10 @@ void Application::StartOnlineDataServices() {
         }
         vTaskDelete(nullptr);  // task done, delete itself
     }, "online_data", 8192, this, 5, nullptr);
+    if (task_created != pdPASS) {
+        s_online_task_started.store(false);
+        ESP_LOGE(kTag, "Failed to create online data task");
+    }
 }
 
 void Application::ArmSyncSleepTimer() {
@@ -551,7 +578,8 @@ void Application::ArmSyncSleepTimer() {
     if (sleep_timer_ == nullptr) {
         esp_timer_create_args_t args = {};
         args.callback = [](void* arg) {
-            static_cast<Application*>(arg)->EnterScheduledSleep();
+            auto* self = static_cast<Application*>(arg);
+            self->Schedule([self]() { self->EnterScheduledSleep(); });
         };
         args.arg = this;
         args.dispatch_method = ESP_TIMER_TASK;
@@ -605,10 +633,12 @@ void Application::EnterManualSleep() {
 
 void Application::Run() {
     while (true) {
+        PumpScheduledTasks();
         if (rawdraw_ui_manager_) {
+            rawdraw_ui_manager_->PumpUiTasks();
             rawdraw_ui_manager_->PumpClockRefresh();
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -619,8 +649,23 @@ bool Application::SetDeviceState(DeviceState state) {
 }
 
 void Application::Schedule(std::function<void()>&& callback) {
-    if (callback) {
-        callback();
+    if (!callback) return;
+    std::lock_guard<std::mutex> lock(scheduled_tasks_mutex_);
+    if (scheduled_tasks_.size() >= 64) {
+        ESP_LOGW(kTag, "Main-loop task queue full; dropping callback");
+        return;
+    }
+    scheduled_tasks_.push_back(std::move(callback));
+}
+
+void Application::PumpScheduledTasks() {
+    std::deque<std::function<void()>> tasks;
+    {
+        std::lock_guard<std::mutex> lock(scheduled_tasks_mutex_);
+        tasks.swap(scheduled_tasks_);
+    }
+    for (auto& task : tasks) {
+        task();
     }
 }
 
@@ -645,6 +690,10 @@ bool Application::CanEnterSleepMode() const {
 }
 
 void Application::UpdateStatusBarForUi() {
+    Schedule([this]() { UpdateStatusBarForUiOnMainLoop(); });
+}
+
+void Application::UpdateStatusBarForUiOnMainLoop() {
     auto& board = Board::GetInstance();
     int battery_level = -1;
     bool charging = false;

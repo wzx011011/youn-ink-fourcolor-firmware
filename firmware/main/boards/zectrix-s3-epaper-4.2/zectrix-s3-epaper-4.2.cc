@@ -25,6 +25,7 @@
 #include "esp_network.h"
 #include "network_interface.h"
 #include "rtc_pcf8563.h"
+#include "rawdraw/rawdraw.h"
 #include "ssid_manager.h"
 #include "ui/rawdraw_ui_manager.h"
 #include "wifi_manager.h"
@@ -333,7 +334,8 @@ private:
         // RawDraw now keeps a 2bpp semantic framebuffer even for 1bpp panels.
         // The display driver down-converts RED/YELLOW/BLACK to black and WHITE
         // to white when sending data to a black/white EPD.
-        lcd_spi_data.buffer_len = ((EXAMPLE_LCD_WIDTH * 2 + 7) / 8) * EXAMPLE_LCD_HEIGHT;
+        lcd_spi_data.buffer_len = static_cast<int>(
+            rawdraw::FramebufferSize(EXAMPLE_LCD_WIDTH, EXAMPLE_LCD_HEIGHT));
         display_ = new CustomLcdDisplay(nullptr,
                                         nullptr,
                                         EXAMPLE_LCD_WIDTH,

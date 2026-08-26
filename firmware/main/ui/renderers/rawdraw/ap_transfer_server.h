@@ -14,7 +14,9 @@
 #define AP_TRANSFER_SERVER_H
 
 #include <string>
+#include <atomic>
 #include <functional>
+#include <mutex>
 #include <esp_http_server.h>
 #include <esp_netif.h>
 #include <freertos/FreeRTOS.h>
@@ -40,9 +42,9 @@ public:
     void Stop();
 
     // Check if server is running
-    bool IsRunning() const { return server_ != nullptr; }
-    bool IsApMode() const { return mode_ == TransferMode::kAp; }
-    bool IsLanMode() const { return mode_ == TransferMode::kLan; }
+    bool IsRunning() const { return running_.load(); }
+    bool IsApMode() const { return mode_.load() == TransferMode::kAp; }
+    bool IsLanMode() const { return mode_.load() == TransferMode::kLan; }
 
     // State callback
     enum ServerState {
@@ -91,11 +93,13 @@ private:
 
     httpd_handle_t server_ = nullptr;
     esp_netif_t* ap_netif_ = nullptr;
-    volatile bool running_ = false;
-    volatile bool starting_ = false;
-    TaskHandle_t start_task_ = nullptr;
+    std::mutex lifecycle_mutex_;
+    std::atomic<bool> running_{false};
+    std::atomic<bool> starting_{false};
+    std::atomic<bool> cancel_start_{false};
+    SemaphoreHandle_t start_complete_ = nullptr;
     std::string ap_ip_ = "192.168.4.1";
-    TransferMode mode_ = TransferMode::kNone;
+    std::atomic<TransferMode> mode_{TransferMode::kNone};
 
     std::function<void(ServerState, const std::string&)> state_callback_;
     std::function<void(const char* photo_id)> image_received_callback_;
