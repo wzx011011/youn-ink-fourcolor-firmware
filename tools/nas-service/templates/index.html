@@ -227,16 +227,40 @@ input[type=file] { display: none; }
     <button class="btn btn-primary" style="margin-top:10px" onclick="saveBirth()">💾 保存出生日期</button>
   </div>
   <div class="settings-box">
-    <h3>🤖 AI 对话 (dify)</h3>
-    <div style="font-size:12px;color:#666;margin-bottom:8px">
-      粘贴 dify 应用的 API Key(dify 控制台 → 应用 → 访问 API)。保存在 NAS,不会进入固件。
+    <h3>🤖 AI 对话后端</h3>
+    <div style="font-size:12px;color:#666;margin-bottom:10px">
+      「AI对话」看板使用的服务商与凭据,保存在 NAS 本地。
     </div>
-    <div style="display:flex;gap:8px">
-      <input type="password" id="difyKey" placeholder="app-xxxxxxxx"
-             style="flex:1;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;padding:8px;color:#ddd">
-      <button class="btn btn-primary" style="padding:8px 14px" onclick="saveDifyKey()">保存</button>
+    <div class="field"><label>服务商</label>
+      <select id="aiProvider" onchange="onProviderChange()" style="width:100%;background:#1a1a1a;color:#ddd;border:1px solid #3a3a3a;border-radius:6px;padding:8px">
+        <option value="zhipu">智谱 GLM(推荐,国内直连)</option>
+        <option value="dify">dify 应用(NAS 本机)</option>
+      </select>
     </div>
-    <div id="difyStatus" style="font-size:11px;color:#888;margin-top:6px"></div>
+
+    <!-- 智谱配置 -->
+    <div id="zhipuCfg">
+      <div class="field"><label>API Key</label>
+        <input type="password" id="zhipuKey" placeholder="xxxxxxxx.yyyyyyyy"></div>
+      <div class="field"><label>模型名</label>
+        <input type="text" id="zhipuModel" placeholder="glm-5.3-flash"></div>
+      <div style="font-size:11px;color:#666">
+        智谱开放平台 open.bigmodel.cn → API Keys 页面创建复制。
+      </div>
+    </div>
+
+    <!-- dify 配置 -->
+    <div id="difyCfg" style="display:none">
+      <div class="field"><label>dify 应用 API Key(app- 开头)</label>
+        <input type="password" id="difyKey2" placeholder="app-xxxxxxxx">
+      </div>
+      <div style="font-size:11px;color:#666">dify 控制台 → 你的应用 → 访问 API。</div>
+    </div>
+
+    <div style="display:flex;gap:8px;align-items:center;margin-top:12px">
+      <button class="btn btn-primary" style="flex:1" onclick="saveAiConfig()">💾 保存 AI 配置</button>
+    </div>
+    <div id="aiStatus" style="font-size:11px;color:#888;margin-top:6px"></div>
   </div>
   <div class="settings-box">
     <h3>ℹ️ 关于</h3>
@@ -269,7 +293,7 @@ document.querySelectorAll('.tab').forEach(t => {
     t.classList.add('active');
     $('panel-' + t.dataset.tab).classList.add('active');
     if (t.dataset.tab === 'control') checkDevice();
-    if (t.dataset.tab === 'settings') { loadConfig(); loadSchedule(); loadDifyKey(); }
+    if (t.dataset.tab === 'settings') { loadConfig(); loadSchedule(); loadAiConfig(); }
   };
 });
 
@@ -542,29 +566,56 @@ async function saveSchedule() {
   }
 }
 
-async function loadDifyKey() {
+async function loadAiConfig() {
   try {
-    const r = await fetch('/api/dify_key');
+    const r = await fetch('/api/ai_config');
     const d = await r.json();
-    $('difyStatus').textContent = d.configured
-      ? '✓ 已配置 API Key' : '未配置,填入后可使用「AI对话」看板';
-    $('difyStatus').style.color = d.configured ? '#34c759' : '#888';
+    $('aiProvider').value = d.provider || 'zhipu';
+    $('zhipuModel').value = d.zhipu_model || 'glm-5.3-flash';
+    onProviderChange();
+    const st = $('aiStatus');
+    if (d.configured) {
+      st.textContent = `✓ 当前使用 ${d.provider === 'zhipu' ? '智谱 GLM(' + d.zhipu_model + ')' : 'dify'}`;
+      st.style.color = '#34c759';
+    } else {
+      st.textContent = '未配置,保存后可用「AI对话」看板';
+      st.style.color = '#888';
+    }
   } catch (e) {}
 }
 
-async function saveDifyKey() {
-  const key = $('difyKey').value.trim();
-  setSpinner('保存 Key...');
+function onProviderChange() {
+  const isZhipu = $('aiProvider').value === 'zhipu';
+  $('zhipuCfg').style.display = isZhipu ? 'block' : 'none';
+  $('difyCfg').style.display = isZhipu ? 'none' : 'block';
+}
+
+async function saveAiConfig() {
+  const provider = $('aiProvider').value;
+  // 只提交当前显示的服务商字段;其他保留原值(传 undefined = 不覆盖)
+  const body = {provider};
+  if (provider === 'zhipu') {
+    const k = $('zhipuKey').value.trim();
+    if (!k && !confirm('智谱 Key 为空,是否仅切换服务商(沿用已存 Key)?')) return;
+    if (k) body.zhipu_key = k;
+    if ($('zhipuModel').value.trim()) body.zhipu_model = $('zhipuModel').value.trim();
+  } else {
+    const k = $('difyKey2').value.trim();
+    if (!k && !confirm('dify Key 为空,是否仅切换服务商(沿用已存 Key)?')) return;
+    if (k) body.dify_key = k;
+  }
+  setSpinner('保存 AI 配置...');
   try {
-    const r = await fetch('/api/dify_key', {
+    const r = await fetch('/api/ai_config', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({key})
+      body: JSON.stringify(body)
     });
     const j = await r.json();
     if (j.ok) {
-      $('difyStatus').textContent = j.configured ? '✓ 已配置 API Key' : '已清除';
-      $('difyStatus').style.color = '#34c759';
-      setStatus(j.configured ? '✓ dify Key 已保存' : 'dify Key 已清除', 'success');
+      $('aiStatus').textContent = `✓ 已保存,当前 ${provider === 'zhipu' ? '智谱 GLM' : 'dify'}`;
+      $('aiStatus').style.color = '#34c759';
+      setStatus('✓ AI 配置已保存', 'success');
+      $('zhipuKey').value = ''; $('difyKey2').value = '';
     } else throw new Error(j.error || '失败');
   } catch (e) { setStatus('保存失败: ' + e.message, 'error'); }
 }

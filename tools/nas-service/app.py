@@ -414,6 +414,7 @@ def api_device_lifebar_birth():
 from board.registry import BOARDS, get_template
 from board import config_store
 from board.scheduler import scheduler
+from board import chat as chat_mod
 
 
 # Short-lived data cache: the detail page fires N template previews at once
@@ -567,25 +568,42 @@ def api_board_list():
 
 @app.route("/api/board/chat", methods=["POST"])
 def api_board_chat():
-    """Ask dify, render the answer, push to the device.
+    """Ask the configured AI backend (zhipu/dify), render, push.
     Body: {question: "...", auto_switch: bool} """
-    from board import chat as chat_mod
     data = request.get_json(force=True, silent=True) or {}
     question = (data.get("question") or "").strip()
     if not question:
         return jsonify(ok=False, error="请输入问题"), 400
     # Don't waste an e-ink refresh on a guidance screen — reject early so
-    # the phone can prompt for the API key instead.
-    if not chat_mod._api_key():
-        return jsonify(ok=False,
-                       error="未配置 DIFY_API_KEY,请在「设置」页粘贴 dify 应用 Key",
-                       need_key=True), 400
+    # the phone can prompt for the API config instead.
+    cfg = chat_mod.get_ai_config()
+    if not cfg["configured"]:
+        return jsonify(ok=False, need_key=True,
+                       error="未配置 AI 后端,请在「设置」页选择服务商并粘贴 Key"), 400
     auto_switch = bool(data.get("auto_switch", True))
     result = render_board("chat", template_id="text", push=True,
                           auto_switch=auto_switch,
                           data_override={"question": question})
     code = 200 if result.get("ok") else 400
     return jsonify(result), code
+
+
+@app.route("/api/ai_config", methods=["GET", "POST"])
+def api_ai_config():
+    """Get/set the AI backend (provider + credentials)."""
+    if request.method == "GET":
+        return jsonify(**chat_mod.get_ai_config())
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        chat_mod.set_ai_config(
+            provider=data.get("provider"),
+            zhipu_key=data.get("zhipu_key"),
+            zhipu_model=data.get("zhipu_model"),
+            dify_key=data.get("dify_key"),
+        )
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 500
+    return jsonify(ok=True, **chat_mod.get_ai_config())
 
 
 @app.route("/api/dify_key", methods=["GET", "POST"])

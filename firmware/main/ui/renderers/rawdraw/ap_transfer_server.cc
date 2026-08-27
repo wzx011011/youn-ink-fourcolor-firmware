@@ -469,6 +469,9 @@ bool ApTransferServer::StartAccessPoint() {
 bool ApTransferServer::StartHttpServer() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 16;
+    // Rapid gallery uploads: evict the oldest idle session instead of
+    // refusing new ones once the small default socket pool is busy.
+    config.lru_purge_enable = true;
     config.max_open_sockets = 4;
     config.recv_wait_timeout = 30;  // Large images take time
     config.send_wait_timeout = 10;
@@ -633,21 +636,44 @@ esp_err_t ApTransferServer::IndexHandler(httpd_req_t* req) {
     return ret;
 }
 
+// Consume any unread request body before responding+closing; otherwise
+// LWIP tears the connection down with RST while inbound bytes are pending
+// and the client never sees the JSON error.
+static void DrainRequestBody(httpd_req_t* req) {
+    char sink[512];
+    int remaining = static_cast<int>(req->content_len);
+    while (remaining > 0) {
+        int n = httpd_req_recv(req, sink,
+                               remaining < static_cast<int>(sizeof(sink))
+                                   ? remaining
+                                   : static_cast<int>(sizeof(sink)));
+        if (n <= 0) break;
+        remaining -= n;
+    }
+}
+
 esp_err_t ApTransferServer::UploadHandler(httpd_req_t* req) {
     auto* self = static_cast<ApTransferServer*>(req->user_ctx);
-    
+
     self->NotifyState(kReceivingImage, "Receiving image...");
 
-    char query[96] = {};
+    // 256B: the NAS importer appends title/location query params (percent-
+    // encoded CJK) which overflow the old 96B buffer — the format key then
+    // never parses, the size check misfires, and the upload is refused.
+    char query[256] = {};
     char format[16] = {};
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-        httpd_query_key_value(query, "format", format, sizeof(format));
+        if (httpd_query_key_value(query, "format", format, sizeof(format)) != ESP_OK)
+            format[0] = '\0';
     }
     const bool is_2bpp = strcmp(format, "bwry2bpp") == 0 || strcmp(format, "2bpp") == 0;
     const size_t expected_size = is_2bpp ? kImage2bppSize : kImage1bppSize;
 
     if (req->content_len != expected_size) {
-        ESP_LOGW(kTag, "Invalid upload size: %u", static_cast<unsigned>(req->content_len));
+        ESP_LOGW(kTag, "Invalid upload size: %u (need %u, format='%s')",
+                 static_cast<unsigned>(req->content_len),
+                 static_cast<unsigned>(expected_size), format[0] ? format : "(none)");
+        DrainRequestBody(req);
         httpd_resp_set_type(req, "application/json");
         httpd_resp_set_hdr(req, "Connection", "close");
         esp_err_t send_ret = httpd_resp_send(req, is_2bpp
@@ -1027,23 +1053,8 @@ esp_err_t ApTransferServer::ScreenshotSetHandler(httpd_req_t* req) {
     // page. Query: ?format=bwry2bpp&label=老黄历  Body: raw pixel bytes
     // (30000 for 2bpp, 15000 for 1bpp, both 400x300).
     auto* self = static_cast<ApTransferServer*>(req->user_ctx);
-    auto drain_body = [](httpd_req_t* r) {
-        // Rejecting a request without consuming its body makes LWIP close
-        // with RST while inbound bytes are still pending — the client then
-        // sees the connection reset instead of our JSON. Drain first.
-        char sink[512];
-        int remaining = static_cast<int>(r->content_len);
-        while (remaining > 0) {
-            int n = httpd_req_recv(r, sink,
-                                   remaining < static_cast<int>(sizeof(sink))
-                                       ? remaining
-                                       : static_cast<int>(sizeof(sink)));
-            if (n <= 0) break;
-            remaining -= n;
-        }
-    };
     if (!self) {
-        drain_body(req);
+        DrainRequestBody(req);
         SendJson(req, "{\"success\":false,\"error\":\"no_ctx\"}");
         return ESP_OK;
     }
@@ -1073,7 +1084,7 @@ esp_err_t ApTransferServer::ScreenshotSetHandler(httpd_req_t* req) {
         ESP_LOGW(kTag, "Screenshot wrong size: %u (need %u)",
                  static_cast<unsigned>(req->content_len),
                  static_cast<unsigned>(expected_size));
-        drain_body(req);
+        DrainRequestBody(req);
         SendJson(req, is_2bpp
             ? "{\"success\":false,\"error\":\"需要400x300 2bpp数据(30000字节)\"}"
             : "{\"success\":false,\"error\":\"需要400x300 1bpp数据(15000字节)\"}");

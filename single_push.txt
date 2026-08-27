@@ -1,0 +1,11 @@
+Traceback (most recent call last):
+  File "<stdin>", line 3, in <module>
+  File "C:\Users\67376\AppData\Local\Programs\Python\Python314\Lib\site-packages\serial\serialwin32.py", line 33, in __init__
+    super(Serial, self).__init__(*args, **kwargs)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\67376\AppData\Local\Programs\Python\Python314\Lib\site-packages\serial\serialutil.py", line 244, in __init__
+    self.open()
+    ~~~~~~~~~^^
+  File "C:\Users\67376\AppData\Local\Programs\Python\Python314\Lib\site-packages\serial\serialwin32.py", line 64, in open
+    raise SerialException("could not open port {!r}: {!r}".format(self.portstr, ctypes.WinError()))
+serial.serialutil.SerialException: could not open port 'COM9': FileNotFoundError(2, '系统找不到指定的文件。', None, 2)

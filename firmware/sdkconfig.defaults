@@ -82,3 +82,8 @@ CONFIG_LV_BUILD_EXAMPLES=n
 CONFIG_LV_BUILD_DEMOS=n
 CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=16384
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=8192
+
+# Photo-gallery bulk uploads open/close many rapid connections; the stock
+# 16-slot TCP pool fills with TIME_WAIT PCBs after ~8 posts and every new
+# SYN gets reset until slots age out. 64 covers a full 65-photo import.
+CONFIG_LWIP_MAX_ACTIVE_TCP=64
