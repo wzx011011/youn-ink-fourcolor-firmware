@@ -17,6 +17,12 @@ protected:
     esp_lcd_panel_handle_t panel_ = nullptr;
     lv_obj_t* factory_test_screen_ = nullptr;
 
+    // True only after the LVGL port has been initialized by the concrete
+    // display. In rawdraw builds (CONFIG_USE_EMOTE_MESSAGE_STYLE=y) no LVGL
+    // port exists and Lock()/Unlock() must not call lvgl_port_lock(), which
+    // asserts on the uninitialized mux.
+    bool lvgl_port_ready_ = false;
+
     UiPageRegistry page_registry_;
     FactoryTestPageAdapter* factory_test_page_adapter_ = nullptr;
     bool ui_setup_done_ = false;

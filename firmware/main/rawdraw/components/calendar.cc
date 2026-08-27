@@ -143,25 +143,37 @@ const char* Calendar::GetSolarTerm(int month, int day) {
 
 // ============================================================
 // Proper lunar calendar algorithm (2000-2050)
-// Uses embedded Chinese New Year dates + alternating month sizes.
-// Accuracy: ±1-2 days for lunar day, ±1 month in leap years.
+// Table-driven: one packed word per lunar year replaces the old
+// "Spring Festival date + alternating 30/29 month" approximation,
+// which drifted 1-2+ days because real lunar months do not
+// alternate. The table below was generated from astronomical
+// lunar data and verified day-by-day (18,634 days) against two
+// independent lunar-calendar libraries at generation time.
 // ============================================================
 
-// Chinese New Year dates for 2000-2050
-// Format: (month << 8) | day  (day in decimal, NOT hex!)
-static const uint16_t kSpringInfo[] = {
-    0x0205, 0x0118, 0x020C, 0x0201, 0x0116,  // 2000-2004
-    0x0209, 0x011D, 0x0212, 0x0207, 0x011A,  // 2005-2009
-    0x020E, 0x0203, 0x0117, 0x020A, 0x011F,  // 2010-2014
-    0x0213, 0x0208, 0x011C, 0x0210, 0x0205,  // 2015-2019
-    0x0119, 0x020C, 0x0201, 0x0116, 0x020A,  // 2020-2024
-    0x011D, 0x0211, 0x0206, 0x011A, 0x020D,  // 2025-2029
-    0x0203, 0x0117, 0x020B, 0x011F, 0x0213,  // 2030-2034
-    0x0208, 0x011C, 0x020F, 0x0204, 0x0118,  // 2035-2039
-    0x020C, 0x0201, 0x0116, 0x020A, 0x011E,  // 2040-2044
-    0x0211, 0x0206, 0x011A, 0x020E, 0x0202,  // 2045-2049
-    0x0117,                                     // 2050
+// Packed lunar year data, index = year - 2000:
+//   bits 0-3  : leap month number (0 = none)
+//   bits 4-16 : month-length flags in calendar order, bit set = 30-day
+//               month (13 flags; the 13th only exists in leap years)
+//   bits 17-22: days from Jan 20 of that Gregorian year to the Spring
+//               Festival (lunar 1/1); range 1..62 covers Jan 21..Mar 22
+static const uint32_t kLunarYearData[] = {
+    0x00206930, 0x000952B4, 0x002E52B0, 0x0018A5B0, 0x000555A2,  // 2000-2004
+    0x002856A0, 0x0013B557, 0x003ABA40, 0x0024B490, 0x000DA935,  // 2005-2009
+    0x0032A950, 0x001C52D0, 0x0006AAD4, 0x002AAB50, 0x00175AA9,  // 2010-2014
+    0x003C5D20, 0x0026DA50, 0x0011D4A6, 0x0036D4A0, 0x0020C950,  // 2015-2019
+    0x000B52E4, 0x002E5560, 0x0018AB50, 0x00055B22, 0x002A6D20,  // 2020-2024
+    0x0012EA56, 0x00387250, 0x002264B0, 0x000CC975, 0x0030CAB0,  // 2025-2029
+    0x001C55A0, 0x0006AD63, 0x002CB690, 0x0017752B, 0x003CB520,  // 2030-2034
+    0x0026B250, 0x0011A4B6, 0x0034A4B0, 0x001E4AB0, 0x000855B5,  // 2035-2039
+    0x002E5AD0, 0x0018B6A0, 0x0005B522, 0x002AD920, 0x0015D257,  // 2040-2044
+    0x0038D250, 0x0022A550, 0x000D4AD5, 0x00324B60, 0x001A5B50,  // 2045-2049
+    0x0006DAA3,                                                  // 2050
 };
+
+// Spring Festival 2051 offset from Jan 20, 2051: the exclusive end boundary
+// of the table (lunar year 2050 ends the day before).
+static constexpr int kLunarEndSpringOffset = 22;
 
 static constexpr int kLunarMinYear = 2000;
 static constexpr int kLunarMaxYear = 2050;
@@ -170,17 +182,6 @@ static constexpr int kLunarYearCount = kLunarMaxYear - kLunarMinYear + 1;  // 51
 // Tian Gan (天干) and Di Zhi (地支) for year names
 static const char* kTianGan[] = {"甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"};
 static const char* kDiZhi[] = {"子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥"};
-
-// Leap month info for 2000-2050 (0 = no leap, 1-12 = which month has leap)
-// Derived from lunardate library validation
-static const uint8_t kLeapMonths[] = {
-    0, 4, 0, 0, 2, 0, 7, 0, 0, 5,  // 2000-2009
-    0, 0, 4, 0, 9, 0, 0, 6, 0, 0,  // 2010-2019
-    4, 0, 0, 2, 0, 6, 0, 0, 5, 0,  // 2020-2029
-    0, 3, 0, 11, 0, 0, 6, 0, 0, 5,  // 2030-2039
-    0, 0, 2, 0, 7, 0, 0, 5, 0, 0,  // 2040-2049
-    3,                                // 2050
-};
 
 static bool IsGregorianLeap(int year) {
     return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
@@ -206,66 +207,51 @@ static int DaysInGregorianYear(int year) {
     return IsGregorianLeap(year) ? 366 : 365;
 }
 
+// Spring Festival (lunar 1/1) day-of-year for a table year.
+static int SpringFestivalDayOfYear(int year) {
+    const uint32_t w = kLunarYearData[year - kLunarMinYear];
+    return DayOfYear(year, 1, 20) + static_cast<int>((w >> 17) & 0x3F);
+}
+
 Calendar::LunarDate Calendar::ToLunarDate(int year, int month, int day) {
     if (year < kLunarMinYear || year > kLunarMaxYear) return {0, 0, 0, false};
 
-    int idx = year - kLunarMinYear;
-    uint16_t cny = kSpringInfo[idx];
-    int cny_m = (cny >> 8) & 0xff;
-    int cny_d = cny & 0xff;
-
-    int doy = DayOfYear(year, month, day);
-    int cny_doy = DayOfYear(year, cny_m, cny_d);
-
     int lunar_year = year;
-    int days_since_cny;
+    int days_since_cny = DayOfYear(year, month, day) - SpringFestivalDayOfYear(year);
 
-    if (doy < cny_doy) {
+    if (days_since_cny < 0) {
         // Before CNY, belongs to previous lunar year
         if (year <= kLunarMinYear) return {0, 0, 0, false};
         lunar_year = year - 1;
-        uint16_t prev_cny = kSpringInfo[idx - 1];
-        int prev_cny_m = (prev_cny >> 8) & 0xff;
-        int prev_cny_d = prev_cny & 0xff;
-        int prev_cny_doy = DayOfYear(year - 1, prev_cny_m, prev_cny_d);
-        int prev_year_days = DaysInGregorianYear(year - 1);
-        days_since_cny = (prev_year_days - prev_cny_doy) + doy;
-    } else {
-        days_since_cny = doy - cny_doy;
+        const int prev_year_days = DaysInGregorianYear(year - 1);
+        days_since_cny += prev_year_days - SpringFestivalDayOfYear(year - 1);
     }
 
-    // Walk through lunar months using alternating 30/29 pattern
-    int lunar_month = 1;
-    int leap_month = (lunar_year >= kLunarMinYear && lunar_year <= kLunarMaxYear)
-        ? kLeapMonths[lunar_year - kLunarMinYear] : 0;
-
-    while (lunar_month <= 12) {
-        // Alternating: odd months = 30, even = 29
-        int days_in_month = (lunar_month % 2 == 1) ? 30 : 29;
-
-        if (days_since_cny < days_in_month) {
+    // Walk the real month lengths from the packed table: months 1..12 with
+    // the leap month (if any) inserted right after its number.
+    const uint32_t w = kLunarYearData[lunar_year - kLunarMinYear];
+    const int leap_month = static_cast<int>(w & 0xF);
+    int flag_bit = 4;  // bit index of the next month's length flag
+    for (int lunar_month = 1; lunar_month <= 12; ++lunar_month) {
+        const int month_days = ((w >> flag_bit) & 1) ? 30 : 29;
+        ++flag_bit;
+        if (days_since_cny < month_days) {
             return {lunar_year, lunar_month, days_since_cny + 1, false};
         }
-        days_since_cny -= days_in_month;
+        days_since_cny -= month_days;
 
-        // Check for leap month
         if (leap_month == lunar_month) {
-            int leap_days = 29;  // Default 29 days for leap month
+            const int leap_days = ((w >> flag_bit) & 1) ? 30 : 29;
+            ++flag_bit;
             if (days_since_cny < leap_days) {
                 return {lunar_year, lunar_month, days_since_cny + 1, true};
             }
             days_since_cny -= leap_days;
         }
-
-        lunar_month++;
     }
 
-    // If we still have days left (shouldn't happen with correct data), clamp
-    if (lunar_month > 12) {
-        return {lunar_year, 12, 1, false};
-    }
-
-    return {lunar_year, lunar_month, days_since_cny + 1, false};
+    // Out of table range (dates past the end of lunar 2050): clamp
+    return {lunar_year, 12, 1, false};
 }
 
 const char* Calendar::GetLunarYearName(int year) {

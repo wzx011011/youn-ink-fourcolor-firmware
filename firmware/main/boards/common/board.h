@@ -83,6 +83,10 @@ public:
     virtual void SetPowerSaveLevel(PowerSaveLevel level) = 0;
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
+    // Called by the application right before esp_deep_sleep_start(). Boards
+    // should power down rails and latch GPIO levels for deep sleep here.
+    // Must be idempotent and safe to call multiple times.
+    virtual void PrepareForDeepSleep() {}
 };
 
 #define DECLARE_BOARD(BOARD_CLASS_NAME) \

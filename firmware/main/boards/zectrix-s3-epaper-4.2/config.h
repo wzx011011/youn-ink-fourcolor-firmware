@@ -41,6 +41,8 @@
 #define NFC_FD_GPIO             GPIO_NUM_7
 #define NFC_PWR_GPIO            GPIO_NUM_21
 #define NFC_FD_ACTIVE_LEVEL     0
+// 手机碰一碰打开的后台管理页地址（NAS 部署），地址变更需改此处重刷固件
+#define NFC_LANDING_URL         "http://192.168.100.78:8848"
 /*EPD port Init*/
 #define EPD_SPI_NUM        SPI3_HOST
 

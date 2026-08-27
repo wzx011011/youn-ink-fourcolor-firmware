@@ -194,6 +194,11 @@ void WifiManager::ResumeStationAfterExternalAp() {
     station_->ResumeAfterExternalAp();
 }
 
+bool WifiManager::IsStationActive() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return station_active_;
+}
+
 bool WifiManager::IsConnected() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return station_active_ && station_ && station_->IsConnected();

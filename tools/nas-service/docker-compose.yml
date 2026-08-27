@@ -17,8 +17,14 @@ services:
     environment:
       - DEVICE_IP=192.168.100.75  # 墨水屏设备 IP(设备换网络后改这里)
       - DEVICE_PORT=80            # 设备 HTTP 端口
+      # 可选:设备侧令牌(固件「设置」页查看,LAN 鉴权启用时必填)
+      # 也可在网页「设置」里填,仅存内存;重启后需重填或在这里固化
+      # - DEVICE_TOKEN=abcdef01
       - HISTORY_DIR=/data/uploads
       - TZ=Asia/Shanghai
       - PYTHONDONTWRITEBYTECODE=1  # 禁止生成 .pyc,避免改代码后缓存旧版
+      # 可选鉴权:设置后所有 /api/* 请求必须带 X-Auth-Token: <同样的值>
+      # (前端会弹窗让你输入一次并存 localStorage)。强烈建议在暴露到公网时开启:
+      # - NAS_SERVICE_TOKEN=换成一段足够长的随机字符串
     # 看板为纯 PIL 渲染,常驻内存很小;mem_limit 仅作兜底
     mem_limit: 1g

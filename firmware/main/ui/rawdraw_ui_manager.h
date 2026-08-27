@@ -374,9 +374,10 @@ public:
 
     // Push a rendered board image (from NAS Playwright pipeline) into the
     // generic Screenshot page. The image bytes are copied; caller retains
-    // ownership. Safe to call from the HTTP task. If Screenshot is the active
-    // page, the screen refreshes immediately; otherwise the image shows the
-    // next time the user opens the 看板 page.
+    // ownership. UI thread only: the implementation frees and reallocates the
+    // renderer's image buffer, so calling it from the HTTP task while Render()
+    // walks the pixels is a use-after-free. Cross-thread callers must wrap it
+    // in PostUiTask (QueueScreenshot already does).
     bool SetScreenshot(const std::string& label, const uint8_t* data,
                        uint32_t size, int w, int h, bool is_2bpp);
 
@@ -539,7 +540,7 @@ private:
     void RefreshRect(const rawdraw::Rect& rect, bool urgent = false);
     bool QueueScreenshot(const std::string& label, const uint8_t* data,
                          uint32_t size, int w, int h, bool is_2bpp);
-    static const std::array<QuickSwitchItem, 11>& GetQuickSwitchItems();
+    static const std::array<QuickSwitchItem, 10>& GetQuickSwitchItems();
     void MarkAllRenderersFullRefresh();
 };
 

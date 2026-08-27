@@ -7,9 +7,13 @@ eink-photo NAS 服务 — 图片高质量转换 + 推送到墨水屏设备
 """
 
 import base64
+import hmac
 import io
+import ipaddress
 import json
+import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -32,6 +36,11 @@ SIZE_1BPP = SCREEN_WIDTH * SCREEN_HEIGHT // 8        # 15000
 # 设备 IP(默认值,可被 config.json 或环境变量覆盖)
 DEVICE_IP = os.environ.get("DEVICE_IP", "192.168.100.75")
 UPLOAD_PORT = os.environ.get("DEVICE_PORT", "80")  # 设备 /upload 端口
+# 设备侧令牌(固件 LAN 鉴权):环境变量或设置页下发,仅存内存。
+# 固件在 NVS 生成 8 位 hex;LAN 模式下设备要求 POST/DELETE 及 /photos 等
+# 请求带 X-Device-Token 头(GET / 与 GET /status 保持开放)
+DEVICE_TOKEN = os.environ.get("DEVICE_TOKEN", "").strip()
+_DEVICE_TOKEN_RE = re.compile(r"^[0-9a-fA-F]{8,64}$")
 HISTORY_DIR = Path(os.environ.get("HISTORY_DIR", "/data/uploads"))
 HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -46,6 +55,38 @@ DITHER_MODES = {
 }
 
 app = Flask(__name__)
+# 上传保护:超大 body 会拖垮单 worker 的 NAS 容器
+app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20MB
+
+
+# ============================================================
+# 鉴权(可选):设置 NAS_SERVICE_TOKEN 后,/api/* 全部要求
+# X-Auth-Token 头(含 GET,防止 AI Key 等敏感配置被读取)
+# ============================================================
+_AUTH_TOKEN = os.environ.get("NAS_SERVICE_TOKEN", "").strip()
+
+if _AUTH_TOKEN:
+    @app.before_request
+    def _require_token():
+        if request.path.startswith("/api/"):
+            sent = request.headers.get("X-Auth-Token") or ""
+            if not hmac.compare_digest(sent, _AUTH_TOKEN):
+                return jsonify(error="unauthorized: X-Auth-Token 缺失或不匹配"), 401
+else:
+    logging.getLogger(__name__).warning(
+        "NAS_SERVICE_TOKEN 未设置,API 处于无鉴权状态"
+        "(建议在 docker-compose.yml 的 environment 里配置)")
+
+
+def _json_body():
+    """只在 Content-Type 为 application/json 时解析 body(CSRF 加固)。
+
+    跨站表单/无 Content-Type 的 POST 会被拒,配合 token 双保险。
+    """
+    ctype = (request.content_type or "").split(";")[0].strip().lower()
+    if ctype != "application/json":
+        return {}
+    return request.get_json(silent=True) or {}
 
 
 # ============================================================
@@ -106,6 +147,20 @@ def preview_to_png(dithered_img):
     return buf.getvalue()
 
 
+HISTORY_KEEP = 200
+
+
+def _prune_history(keep=HISTORY_KEEP):
+    """转换历史只保留最近 keep 对(.bin/.png),防止 /data 无限增长。"""
+    try:
+        bins = sorted(HISTORY_DIR.glob("*.bin"))
+        for old in bins[:-keep] if keep else bins:
+            old.unlink(missing_ok=True)
+            (HISTORY_DIR / f"{old.stem}.png").unlink(missing_ok=True)
+    except OSError as e:
+        logging.getLogger(__name__).warning("history prune failed: %s", e)
+
+
 def _urlopen_retry(req_or_url, timeout=8, attempts=3):
     """urlopen with retry — the device's WiFi link drops a sizable share of
     first-connection SYNs; one blind retry converts most failures.
@@ -152,13 +207,27 @@ def push_to_device(raw, fmt, title="", endpoint="/upload"):
             url += "&label=" + urllib.parse.quote(title)
         else:
             url += "&title=" + urllib.parse.quote(title)
-    req = urllib.request.Request(url, data=raw, method="POST")
+    req = device_request(url, data=raw, method="POST")
     req.add_header("Content-Type", "application/octet-stream")
+    # /upload 非幂等(失败重试会产生重复照片),不重试;其余端点保持 3 次
+    attempts = 1 if endpoint == "/upload" else 3
     try:
-        with _urlopen_retry(req, timeout=30) as resp:
+        with _urlopen_retry(req, timeout=30, attempts=attempts) as resp:
             return True, resp.read().decode("utf-8", errors="replace")
     except Exception as e:
         return False, str(e)
+
+
+def device_request(url, data=None, method=None):
+    """构造访问设备的 Request;配置了设备令牌则自动带 X-Device-Token。
+
+    固件 LAN 鉴权:GET / 与 GET /status 开放,其余端点需要该头
+    (开放端点会忽略它,所以统一都带)。
+    """
+    req = urllib.request.Request(url, data=data, method=method)
+    if DEVICE_TOKEN:
+        req.add_header("X-Device-Token", DEVICE_TOKEN)
+    return req
 
 
 def device_url(path):
@@ -194,13 +263,13 @@ def device_ping():
     page_control=False. Returns (reachable, supported, pages_json).
     """
     try:
-        with _urlopen_retry(device_url("/status"), timeout=6) as resp:
+        with _urlopen_retry(device_request(device_url("/status")), timeout=6) as resp:
             resp.read()
     except Exception:
         return False, False, "[]"
 
     try:
-        with _urlopen_retry(device_url("/page/list"), timeout=6) as resp:
+        with _urlopen_retry(device_request(device_url("/page/list")), timeout=6) as resp:
             device_pages = json.loads(resp.read().decode("utf-8"))
     except Exception:
         # Older firmware: no /page/list route → remote switching unsupported
@@ -223,9 +292,7 @@ def device_ping():
 def device_switch_page(page_id):
     """转发 /page/show 给设备。"""
     body = json.dumps({"page": page_id}).encode("utf-8")
-    req = urllib.request.Request(
-        device_url("/page/show"), data=body, method="POST"
-    )
+    req = device_request(device_url("/page/show"), data=body, method="POST")
     req.add_header("Content-Type", "application/json")
     try:
         with _urlopen_retry(req, timeout=8) as resp:
@@ -286,12 +353,13 @@ def api_convert():
 
     preview_png = preview_to_png(dithered)
 
-    # 存历史(可选)
-    ts = int(time.time())
+    # 存历史(可选)。毫秒时间戳:避免同一秒内连续转换互相覆盖
+    ts = int(time.time() * 1000)
     with open(HISTORY_DIR / f"{ts}.bin", "wb") as fp:
         fp.write(raw)
     with open(HISTORY_DIR / f"{ts}.png", "wb") as fp:
         fp.write(preview_png)
+    _prune_history()
 
     return jsonify(
         ok=True,
@@ -305,7 +373,7 @@ def api_convert():
 @app.route("/api/push", methods=["POST"])
 def api_push():
     """推送 raw(从 base64)到设备。"""
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_body()
     raw_b64 = data.get("raw_b64", "")
     fmt = data.get("format", "bwry2bpp")
     title = data.get("title", "")
@@ -313,6 +381,11 @@ def api_push():
         raw = base64.b64decode(raw_b64)
     except Exception:
         return jsonify(error="raw_b64 无效"), 400
+    # 长度必须与面板像素格式一致,防脏数据写坏显存布局
+    if len(raw) not in (SIZE_2BPP, SIZE_1BPP):
+        return jsonify(
+            error=f"raw 大小不符: {len(raw)} 字节(应为 {SIZE_2BPP} bwry2bpp "
+                  f"或 {SIZE_1BPP} 1bpp)"), 400
     ok, msg = push_to_device(raw, fmt, title)
     return jsonify(ok=ok, message=msg, device=f"{DEVICE_IP}:{UPLOAD_PORT}")
 
@@ -325,16 +398,13 @@ def api_bing():
             "https://cn.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=zh-CN",
             headers={"User-Agent": "Mozilla/5.0"},
         )
-        import ssl
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        with urllib.request.urlopen(ctx_req, context=ctx, timeout=15) as resp:
+        # 默认 context:校验证书与主机名(不再关闭验证)
+        with urllib.request.urlopen(ctx_req, timeout=15) as resp:
             meta = json.loads(resp.read().decode("utf-8"))
         img_url = "https://cn.bing.com" + meta["images"][0]["url"]
         copyright = meta["images"][0].get("copyright", "")
         req2 = urllib.request.Request(img_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req2, context=ctx, timeout=30) as resp:
+        with urllib.request.urlopen(req2, timeout=30) as resp:
             img_bytes = resp.read()
         buf = io.BytesIO(img_bytes)
         b64 = base64.b64encode(img_bytes).decode()
@@ -346,15 +416,36 @@ def api_bing():
 
 @app.route("/api/config", methods=["GET", "POST"])
 def api_config():
-    global DEVICE_IP, UPLOAD_PORT
+    global DEVICE_IP, UPLOAD_PORT, DEVICE_TOKEN
     if request.method == "POST":
-        data = request.get_json(force=True, silent=True) or {}
+        data = _json_body()
+        # SSRF 加固:device_ip 必须是合法 IPv4 字面量(拒绝 URL/任意字符串),
+        # 该值后续会被拼进 http://<ip>... 去访问设备
         if data.get("device_ip"):
-            DEVICE_IP = data["device_ip"]
+            try:
+                ipaddress.IPv4Address(str(data["device_ip"]).strip())
+            except ValueError:
+                return jsonify(ok=False, error="device_ip 需为合法 IPv4 地址"), 400
+            DEVICE_IP = str(data["device_ip"]).strip()
         if data.get("device_port"):
-            UPLOAD_PORT = data["device_port"]
-        return jsonify(ok=True, device_ip=DEVICE_IP, device_port=UPLOAD_PORT)
-    return jsonify(device_ip=DEVICE_IP, device_port=UPLOAD_PORT)
+            try:
+                port = int(data["device_port"])
+            except (TypeError, ValueError):
+                return jsonify(ok=False, error="device_port 需为 1-65535 整数"), 400
+            if not 1 <= port <= 65535:
+                return jsonify(ok=False, error="device_port 需为 1-65535 整数"), 400
+            UPLOAD_PORT = str(port)
+        if "device_token" in data:
+            # 设备令牌:8-64 位 hex(固件 NVS 里是 8 位);空串 = 清除
+            tok = str(data["device_token"] or "").strip()
+            if tok and not _DEVICE_TOKEN_RE.fullmatch(tok):
+                return jsonify(ok=False,
+                               error="device_token 需为 8-64 位十六进制字符"), 400
+            DEVICE_TOKEN = tok
+        return jsonify(ok=True, device_ip=DEVICE_IP, device_port=UPLOAD_PORT,
+                       device_token=DEVICE_TOKEN)
+    return jsonify(device_ip=DEVICE_IP, device_port=UPLOAD_PORT,
+                   device_token=DEVICE_TOKEN)
 
 
 @app.route("/api/device/status", methods=["GET"])
@@ -372,7 +463,7 @@ def api_device_status():
 @app.route("/api/device/switch_page", methods=["POST"])
 def api_device_switch_page():
     """转发 /page/show 给设备(切页面)。"""
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_body()
     page_id = data.get("page", "")
     if not page_id:
         return jsonify(ok=False, error="缺少 page"), 400
@@ -383,13 +474,13 @@ def api_device_switch_page():
 @app.route("/api/device/lifebar_birth", methods=["POST"])
 def api_device_lifebar_birth():
     """配置人生进度出生日期。转发给设备存 NVS。Body: {y,m,d}"""
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_body()
     y, m, d = data.get("y"), data.get("m"), data.get("d")
     if not all(isinstance(v, int) for v in (y, m, d)):
         return jsonify(ok=False, error="y/m/d 需为整数"), 400
     url = device_url("/lifebar/birth")
     body = json.dumps({"y": y, "m": m, "d": d}).encode()
-    req = urllib.request.Request(url, data=body, method="POST")
+    req = device_request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
     try:
         with _urlopen_retry(req, timeout=10) as resp:
@@ -423,15 +514,19 @@ from board import chat as chat_mod
 # burst to one upstream call per board.
 _DATA_CACHE = {}
 _DATA_TTL = 60
+_DATA_CACHE_LOCK = threading.Lock()
 
 
 def _get_data_cached(spec, board_id):
     now = time.time()
-    hit = _DATA_CACHE.get(board_id)
-    if hit and now - hit[0] < _DATA_TTL:
-        return hit[1]
+    with _DATA_CACHE_LOCK:
+        hit = _DATA_CACHE.get(board_id)
+        if hit and now - hit[0] < _DATA_TTL:
+            return hit[1]
+    # 慢的远端调用放锁外并发执行,只对字典读写加锁
     data = spec.get_data()
-    _DATA_CACHE[board_id] = (now, data)
+    with _DATA_CACHE_LOCK:
+        _DATA_CACHE[board_id] = (now, data)
     return data
 
 
@@ -525,7 +620,7 @@ def api_board_preview():
 @app.route("/api/board/render", methods=["POST"])
 def api_board_render():
     """Render a board template. Body JSON: {board, template, push, auto_switch}."""
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_body()
     board_id = data.get("board", "almanac")
     template_id = data.get("template", "")
     push = bool(data.get("push", False))
@@ -570,7 +665,7 @@ def api_board_list():
 def api_board_chat():
     """Ask the configured AI backend (zhipu/dify), render, push.
     Body: {question: "...", auto_switch: bool} """
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_body()
     question = (data.get("question") or "").strip()
     if not question:
         return jsonify(ok=False, error="请输入问题"), 400
@@ -593,7 +688,7 @@ def api_ai_config():
     """Get/set the AI backend (provider + credentials)."""
     if request.method == "GET":
         return jsonify(**chat_mod.get_ai_config())
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_body()
     try:
         chat_mod.set_ai_config(
             provider=data.get("provider"),
@@ -613,7 +708,7 @@ def api_dify_key():
     if request.method == "GET":
         key = chat_mod._api_key()
         return jsonify(configured=bool(key))
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_body()
     key = (data.get("key") or "").strip()
     try:
         chat_mod.set_api_key(key)
@@ -648,14 +743,36 @@ def api_schedule_get():
 @app.route("/api/schedule", methods=["POST"])
 def api_schedule_set():
     """Update one board's schedule. Body: {board, enabled, template, interval_min, smart}."""
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_body()
     board_id = data.get("board", "")
-    if not board_id:
-        return jsonify(ok=False, error="缺少 board"), 400
+    spec = BOARDS.get(board_id)
+    # board/template 白名单校验:存进 config 的值会被 scheduler 直接用来渲染
+    if not spec:
+        return jsonify(ok=False, error=f"未知 board: {board_id}"), 400
     updates = {}
-    for key in ("enabled", "template", "interval_min", "smart"):
-        if key in data:
-            updates[key] = data[key]
+    if "enabled" in data:
+        if not isinstance(data["enabled"], bool):
+            return jsonify(ok=False, error="enabled 需为布尔值"), 400
+        updates["enabled"] = data["enabled"]
+    if "smart" in data:
+        if not isinstance(data["smart"], bool):
+            return jsonify(ok=False, error="smart 需为布尔值"), 400
+        updates["smart"] = data["smart"]
+    if "template" in data:
+        tpl = data["template"]
+        # 空 = 用该板第一个模板;非空必须命中该板模板表
+        if tpl != "" and tpl not in spec.templates:
+            return jsonify(ok=False, error=f"board {board_id} 无模板 {tpl}"), 400
+        updates["template"] = tpl
+    if "interval_min" in data:
+        try:
+            interval = int(data["interval_min"])
+        except (TypeError, ValueError):
+            return jsonify(ok=False, error="interval_min 需为整数"), 400
+        # 5 分钟下限(防刷屏风暴)~ 7 天上限
+        if not 5 <= interval <= 10080:
+            return jsonify(ok=False, error="interval_min 需在 5-10080 之间"), 400
+        updates["interval_min"] = interval
     try:
         updated = config_store.update_board(board_id, **updates)
         return jsonify(ok=True, board=board_id, schedule=updated)

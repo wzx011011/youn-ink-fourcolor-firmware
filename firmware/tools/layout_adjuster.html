@@ -502,19 +502,8 @@ if (selectedIdx < 0) return;
 const c = components[selectedIdx];
 const delta = e.shiftKey ? 5 : 1;
 
-if (e.key === 'ArrowLeft') {
-adjustValue('x', c.x - delta);
-e.preventDefault();
-} else if (e.key === 'ArrowRight') {
-adjustValue('x', c.x + delta);
-e.preventDefault();
-} else if (e.key === 'ArrowUp') {
-adjustValue('y', c.y - delta);
-e.preventDefault();
-} else if (e.key === 'ArrowDown') {
-adjustValue('y', c.y + delta);
-e.preventDefault();
-} else if (e.ctrlKey && e.key === 'ArrowLeft' && c.w) {
+// Ctrl 分支必须放在普通方向键之前,否则会被先命中且不可达
+if (e.ctrlKey && e.key === 'ArrowLeft' && c.w) {
 adjustValue('w', c.w - delta);
 e.preventDefault();
 } else if (e.ctrlKey && e.key === 'ArrowRight' && c.w) {
@@ -525,6 +514,18 @@ adjustValue('h', c.h - delta);
 e.preventDefault();
 } else if (e.ctrlKey && e.key === 'ArrowDown' && c.h) {
 adjustValue('h', c.h + delta);
+e.preventDefault();
+} else if (e.key === 'ArrowLeft') {
+adjustValue('x', c.x - delta);
+e.preventDefault();
+} else if (e.key === 'ArrowRight') {
+adjustValue('x', c.x + delta);
+e.preventDefault();
+} else if (e.key === 'ArrowUp') {
+adjustValue('y', c.y - delta);
+e.preventDefault();
+} else if (e.key === 'ArrowDown') {
+adjustValue('y', c.y + delta);
 e.preventDefault();
 }
 });

@@ -93,7 +93,20 @@ class BoardScheduler:
                 continue
             if cfg.get("smart") and not _is_trading_hours(now_dt):
                 continue
-            interval = int(cfg.get("interval_min", 60)) * 60
+            # 防御:<=0 视为禁用(防配置被写坏后刷屏风暴),<5 拉到 5 分钟下限
+            try:
+                interval_min = int(cfg.get("interval_min", 60))
+            except (TypeError, ValueError):
+                interval_min = 0
+            if interval_min <= 0:
+                logger.warning("scheduler: %s interval_min=%r 无效,视为禁用",
+                               board_id, cfg.get("interval_min"))
+                continue
+            if interval_min < 5:
+                logger.warning("scheduler: %s interval_min=%s 低于 5 分钟下限,"
+                               "按 5 分钟处理", board_id, interval_min)
+                interval_min = 5
+            interval = interval_min * 60
             elapsed = now - self._last_pushed.get(board_id, 0)
             if elapsed >= interval:
                 due.append((elapsed, board_id))

@@ -41,8 +41,20 @@ private:
     void RenderReader(uint8_t* fb, int width, int height);
     void RenderReaderPage(uint8_t* fb, int width, int height, int content_y, int content_h);
     void RenderReaderPortrait(uint8_t* fb, int width, int height);
-    void CalcPages();
-    int CharsPerPage() const;
+
+    // Line-based pagination: the whole file is wrapped into display lines
+    // once per orientation, and a page is a group of max_lines_ consecutive
+    // lines. The old byte-count pagination (450/620 bytes per page) silently
+    // dropped text: lines that wrapped beyond max_lines neither showed on
+    // the page nor appeared on the next one, and the byte boundary could cut
+    // a multi-byte UTF-8 character in half.
+    struct ReaderLine {
+        std::string text;   // display line (no trailing '\n')
+        int offset;         // byte offset of the line start in reader_content_
+    };
+    void BuildReaderLines();
+    void ReaderContentArea(int& content_y, int& content_h) const;
+    int ReaderWrapWidth(int width) const;
     void SetPortraitReader(bool portrait);
 
     std::vector<std::string> files_;
@@ -53,10 +65,11 @@ private:
     bool portrait_reader_ = false;
     std::string reader_filename_;
     std::string reader_content_;
+    std::vector<ReaderLine> reader_lines_;
+    int line_box_h_ = 24;  // per-line vertical step box (ink height + padding)
+    int max_lines_ = 1;    // lines per page for the current orientation
     int current_page_ = 0;
     int total_pages_ = 0;
-    static constexpr int kLandscapeCharsPerPage = 450;
-    static constexpr int kPortraitCharsPerPage = 620;
 
     const lv_font_t* font_ = nullptr;
     const lv_font_t* title_font_ = nullptr;

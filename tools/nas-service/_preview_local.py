@@ -1,15 +1,16 @@
-"""Local render harness — render all 14 board templates with mock data.
+"""Local render harness — render every registered board template with mock data.
 
 Run from tools/nas-service/:  python _preview_local.py [out_dir]
 Bypasses network/data sources (lunar_python etc.) by feeding representative
-data dicts straight into each template's render function.
+data dicts straight into each template's render function. The chat board
+uses its guidance state (no question → 引导文案,不发起 AI 调用).
 """
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from board import almanac, news, weather, stock
+from board import almanac, news, weather, stock, chat
 from board.registry import BOARDS
 
 ALMANAC = {
@@ -58,7 +59,16 @@ STOCK = {
     "is_trading": False, "now_time": "00:36", "now_date": "07-28",
 }
 
-DATA = {"almanac": ALMANAC, "news": NEWS, "weather": WEATHER, "stock": STOCK}
+# chat 看板:无 question 的引导态(get_data() 无参时即此形态,不发起 AI 调用)
+CHAT = {
+    "ok": False,
+    "error": "AI 对话看板",
+    "hint": "先在 NAS 设置页配置 AI 后端",
+    "answer": "", "question": "",
+}
+
+DATA = {"almanac": ALMANAC, "news": NEWS, "weather": WEATHER, "stock": STOCK,
+        "chat": CHAT}
 
 
 def main():

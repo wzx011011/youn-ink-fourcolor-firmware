@@ -2,6 +2,7 @@
 
 #include "boards/zectrix-s3-epaper-4.2/custom_lcd_display.h"
 #include "boards/zectrix-s3-epaper-4.2/config.h"
+#include "boards/zectrix/zectrix_nfc.h"
 #include "board.h"
 #include "common/photo_storage.h"
 #include "common/weather_api.h"
@@ -20,6 +21,8 @@
 
 #include <ctime>
 
+extern "C" ZectrixNfc* ZectrixGetNfc();
+
 namespace {
 
 constexpr char kTag[] = "Application";
@@ -27,10 +30,25 @@ constexpr char kSyncNamespace[] = "sync";
 constexpr char kSyncIntervalKey[] = "sync_interval";
 constexpr char kGalleryNamespace[] = "gallery";
 constexpr char kSlideshowIntervalKey[] = "slide_min";
+constexpr char kLanNamespace[] = "lan";
+constexpr char kLanHttpEnabledKey[] = "http_enabled";
 constexpr int kSettingsSlideshowIndex = 3;
 constexpr int kSettingsWifiIndex = 5;
 constexpr int kSettingsHttpServerIndex = 6;
 constexpr int kSettingsLanIpIndex = 7;
+
+// User preference for the LAN HTTP service. Defaults to enabled so fresh
+// devices keep auto-starting the service after WiFi connects; turning the
+// service off in settings persists false and survives reconnects/reboots.
+bool GetLanHttpEnabledPref() {
+    Settings nvs(kLanNamespace, false);
+    return nvs.GetBool(kLanHttpEnabledKey, true);
+}
+
+void SetLanHttpEnabledPref(bool enabled) {
+    Settings nvs(kLanNamespace, true);
+    nvs.SetBool(kLanHttpEnabledKey, enabled);
+}
 
 std::string FormatMinutesLabel(int minutes) {
     if (minutes <= 0) return "关闭";
@@ -226,6 +244,7 @@ void Application::Initialize() {
                              if (rawdraw_ui_manager_->IsLanHttpServerRunning()) {
                                  ESP_LOGI(kTag, "LAN HTTP server toggled OFF");
                                  rawdraw_ui_manager_->StopLanHttpServer();
+                                 SetLanHttpEnabledPref(false);
                                  UpdateHttpServerSettingsItem(sr, false);
                                  UpdateStatusBarForUi();
                                  if (wifi_connected_.load(std::memory_order_acquire) ||
@@ -236,22 +255,23 @@ void Application::Initialize() {
                              }
 
                              auto& wifi = WifiManager::GetInstance();
-                             if (!wifi_connected_.load(std::memory_order_acquire) && !wifi.IsConnected()) {
-                                 ESP_LOGW(kTag, "LAN HTTP server requires WiFi connection");
-                                 UpdateHttpServerSettingsItem(sr, false, "需先连接WiFi");
-                                 UpdateStatusBarForUi();
-                                 return;
-                             }
-                             const std::string ip = wifi.GetIpAddress();
-                             if (ip.empty()) {
-                                 ESP_LOGW(kTag, "LAN HTTP server requires station IP");
-                                 UpdateHttpServerSettingsItem(sr, false, "等待IP");
-                                 UpdateStatusBarForUi();
-                                 return;
-                             }
-                             const bool started = rawdraw_ui_manager_->StartLanHttpServer(ip);
-                             ESP_LOGI(kTag, "LAN HTTP server toggled ON: started=%d url=http://%s/",
-                                      started ? 1 : 0, ip.c_str());
+                            if (!wifi_connected_.load(std::memory_order_acquire) && !wifi.IsConnected()) {
+                                ESP_LOGW(kTag, "LAN HTTP server requires WiFi connection");
+                                UpdateHttpServerSettingsItem(sr, false, "需先连接WiFi");
+                                UpdateStatusBarForUi();
+                                return;
+                            }
+                            const std::string ip = wifi.GetIpAddress();
+                            if (ip.empty()) {
+                                ESP_LOGW(kTag, "LAN HTTP server requires station IP");
+                                UpdateHttpServerSettingsItem(sr, false, "等待IP");
+                                UpdateStatusBarForUi();
+                                return;
+                            }
+                            const bool started = rawdraw_ui_manager_->StartLanHttpServer(ip);
+                            SetLanHttpEnabledPref(started);
+                            ESP_LOGI(kTag, "LAN HTTP server toggled ON: started=%d url=http://%s/",
+                                     started ? 1 : 0, ip.c_str());
                              if (started && sleep_timer_ != nullptr) {
                                  esp_timer_stop(sleep_timer_);
                                  ESP_LOGI(kTag, "Sync sleep timer paused while LAN HTTP server is running");
@@ -269,6 +289,11 @@ void Application::Initialize() {
                          }});
         items.push_back({"关于", "", nullptr, rawdraw::SettingsItemType::Section, false});
         items.push_back({"固件", PROJECT_VER, nullptr, rawdraw::SettingsItemType::Normal, false});
+        // LAN callers must present this token (X-Device-Token header); it is
+        // generated once and kept in NVS, so showing it here lets the user
+        // pair the NAS service with the device.
+        items.push_back({"访问令牌", rawdraw::ApTransferServer::GetOrCreateAuthToken(),
+                         nullptr, rawdraw::SettingsItemType::Normal, false});
         sr->SetItems(items);
         sr->SetFirmwareVersion("v" PROJECT_VER);
 
@@ -299,7 +324,10 @@ void Application::Initialize() {
                 wifi_connected_.store(true, std::memory_order_release);
                 StartSntpClockSyncOnce();
                 StartOnlineDataServices();
-                if (rawdraw_ui_manager_ && !rawdraw_ui_manager_->IsLanHttpServerRunning()) {
+                // Only auto-start the LAN service when the user has not turned
+                // it off in settings; the preference survives reconnects.
+                if (rawdraw_ui_manager_ && !rawdraw_ui_manager_->IsLanHttpServerRunning() &&
+                    GetLanHttpEnabledPref()) {
                     const std::string ip = data.empty() ? WifiManager::GetInstance().GetIpAddress() : data;
                     if (!ip.empty()) {
                         const bool started = rawdraw_ui_manager_->StartLanHttpServer(ip);
@@ -310,6 +338,8 @@ void Application::Initialize() {
                             UpdateLanIpSettingsItem(sr, ip);
                         }
                     }
+                } else if (!GetLanHttpEnabledPref()) {
+                    ESP_LOGI(kTag, "LAN HTTP server stays off (disabled in settings)");
                 }
                 if (rawdraw_ui_manager_ &&
                     rawdraw_ui_manager_->GetCurrentPage() == ui::RawDrawPageId::APTransfer &&
@@ -366,6 +396,8 @@ void Application::Initialize() {
         }
         });
     });
+
+    StartNfcLandingWriter();
 
     // Start network (non-blocking, WiFi connects asynchronously)
     board.RequestNetwork();
@@ -552,6 +584,51 @@ void Application::StartOnlineDataServices() {
     }
 }
 
+void Application::StartNfcLandingWriter() {
+    // One-shot at boot: make the NFC tag open the NAS management page when a
+    // phone taps it. The landing URL is a fixed LAN address, so this must not
+    // wait for WiFi. I2C transfers block for tens of ms and power-cycle the
+    // tag chip, so they run on a dedicated task instead of the main loop.
+    static std::atomic<bool> s_nfc_task_started{false};
+    if (s_nfc_task_started.exchange(true)) {
+        return;
+    }
+    constexpr int kMaxAttempts = 3;
+    const BaseType_t task_created = xTaskCreate([](void*) {
+        ZectrixNfc* nfc = ZectrixGetNfc();
+        if (nfc == nullptr) {
+            ESP_LOGW(kTag, "NFC landing URL skipped: device not initialized");
+            vTaskDelete(nullptr);
+            return;
+        }
+        if (!nfc->IsPowered() && !nfc->PowerOn()) {
+            ESP_LOGE(kTag, "NFC landing URL skipped: power on failed");
+            vTaskDelete(nullptr);
+            return;
+        }
+
+        // TODO(debug): temporary block dump to diagnose why phones cannot
+        // read the tag. Read-only this boot — no writes.
+        for (uint8_t block = 0; block < 16; ++block) {
+            uint8_t data[ZectrixNfc::kBlockSize] = {};
+            const esp_err_t ret = nfc->ReadBlock(block, data);
+            if (ret != ESP_OK) {
+                ESP_LOGE(kTag, "NFC blk[%02X] read failed: %s", block, esp_err_to_name(ret));
+                continue;
+            }
+            ESP_LOGI(kTag, "NFC blk[%02X] %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                     block,
+                     data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                     data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15]);
+        }
+        vTaskDelete(nullptr);
+    }, "nfc_landing", 4096, nullptr, 5, nullptr);
+    if (task_created != pdPASS) {
+        s_nfc_task_started.store(false);
+        ESP_LOGE(kTag, "Failed to create NFC landing task");
+    }
+}
+
 void Application::ArmSyncSleepTimer() {
     if (IsLocalHttpServiceRunning(rawdraw_ui_manager_.get())) {
         if (sleep_timer_ != nullptr) {
@@ -605,30 +682,63 @@ void Application::EnterScheduledSleep() {
         ArmSyncSleepTimer();
         return;
     }
+    if (!CanEnterSleepMode()) {
+        ESP_LOGI(kTag, "Scheduled sleep skipped: subsystem busy (audio/EPD refresh)");
+        ArmSyncSleepTimer();
+        return;
+    }
 
     ESP_LOGI(kTag, "Entering deep sleep after sync interval; BOOT wakes device");
-    wifi_connected_.store(false, std::memory_order_release);
-    esp_wifi_disconnect();
-    esp_wifi_stop();
-    esp_sleep_enable_ext0_wakeup(static_cast<gpio_num_t>(BOOT_BUTTON_GPIO), 0);
+    PrepareForDeepSleep("scheduled");
     esp_deep_sleep_start();
 }
 
 void Application::EnterManualSleep() {
     ESP_LOGI(kTag, "Entering manual deep sleep; stopping local services and WiFi");
+    PrepareForDeepSleep("manual");
+    esp_deep_sleep_start();
+}
+
+void Application::PrepareForDeepSleep(const char* reason) {
+    ESP_LOGI(kTag, "Preparing deep sleep (%s)", reason);
     if (sleep_timer_ != nullptr) {
         esp_timer_stop(sleep_timer_);
     }
-    if (rawdraw_ui_manager_ && rawdraw_ui_manager_->IsHttpServerRunning()) {
-        rawdraw_ui_manager_->StopApTransferMode();
+    // Stop both HTTP surfaces: the LAN server and the AP transfer mode.
+    if (rawdraw_ui_manager_) {
+        if (rawdraw_ui_manager_->IsLanHttpServerRunning()) {
+            rawdraw_ui_manager_->StopLanHttpServer();
+        }
+        if (rawdraw_ui_manager_->IsApTransferModeRunning()) {
+            rawdraw_ui_manager_->StopApTransferMode();
+        }
     }
     wifi_connected_.store(false, std::memory_order_release);
-    esp_wifi_disconnect();
-    esp_wifi_stop();
-    UpdateStatusBarForUi();
-    vTaskDelay(pdMS_TO_TICKS(300));
+    esp_err_t err = esp_wifi_disconnect();
+    if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGW(kTag, "esp_wifi_disconnect: %s", esp_err_to_name(err));
+    }
+    err = esp_wifi_stop();
+    if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGW(kTag, "esp_wifi_stop: %s", esp_err_to_name(err));
+    }
+    // A four-color full refresh runs 20-30s; wait for it to finish before
+    // the rails get cut, otherwise the panel can be left with a DC bias.
+    if (auto* lcd = dynamic_cast<CustomLcdDisplay*>(Board::GetInstance().GetDisplay())) {
+        int waited_ms = 0;
+        while (lcd->IsRefreshPending() && waited_ms < 30000) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            waited_ms += 100;
+        }
+        if (lcd->IsRefreshPending()) {
+            ESP_LOGW(kTag, "EPD refresh still pending after %d ms; sleeping anyway", waited_ms);
+        }
+    }
+    // Give in-flight NVS/SPIFFS writes a moment to reach flash.
+    vTaskDelay(pdMS_TO_TICKS(200));
+    // Cut peripheral rails and latch GPIO levels so they survive deep sleep.
+    Board::GetInstance().PrepareForDeepSleep();
     esp_sleep_enable_ext0_wakeup(static_cast<gpio_num_t>(BOOT_BUTTON_GPIO), 0);
-    esp_deep_sleep_start();
 }
 
 void Application::Run() {
@@ -685,8 +795,19 @@ void Application::StopSound() {
     audio_service_.ResetDecoder();
 }
 
-bool Application::CanEnterSleepMode() const {
-    return false;
+bool Application::CanEnterSleepMode() {
+    if (IsLocalHttpServiceRunning(rawdraw_ui_manager_.get())) {
+        return false;
+    }
+    if (!audio_service_.IsIdle()) {
+        return false;
+    }
+    if (auto* lcd = dynamic_cast<CustomLcdDisplay*>(Board::GetInstance().GetDisplay())) {
+        if (lcd->IsRefreshPending()) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void Application::UpdateStatusBarForUi() {

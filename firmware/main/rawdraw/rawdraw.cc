@@ -346,7 +346,25 @@ void DrawRoundRectBorder(uint8_t* fb, int width, const Rect& r, int radius, int 
 void DrawText(uint8_t* fb, int width, int x, int y, const char* text,
               const lv_font_t* font, Color color, int height) {
     if (!fb || !text || !font) return;
-    SetFramebufferHeightHint(height);
+    // `height` is a LOCAL clip for this text only: callers pass either the
+    // target buffer's height (e.g. the ebook's 400px portrait buffer) or an
+    // element clip. It must NOT update the global framebuffer height hint —
+    // that hint governs set_pixel() bounds for direct pixel loops elsewhere,
+    // and pinning it to an element-local value used to erase later fills
+    // (e.g. the calendar weekday background row).
+    const int clip_h = (height > 0)
+        ? height
+        : g_framebuffer_height_hint.load(std::memory_order_relaxed);
+
+    // Local 2bpp write bounded by clip_h, independent of the ambient hint.
+    const uint16_t bytes_per_row = (uint16_t)((width * 2 + 7) >> 3);
+    auto write_pixel = [&](int px, int py) {
+        if (px < 0 || py < 0 || px >= width || py >= clip_h) return;
+        uint32_t index = (uint32_t)py * bytes_per_row + (uint32_t)(px >> 2);
+        uint8_t shift = (uint8_t)(6 - ((px & 0x03) << 1));
+        uint8_t mask = (uint8_t)(0x03U << shift);
+        fb[index] = (uint8_t)((fb[index] & (uint8_t)~mask) | ((uint8_t)color << shift));
+    };
 
     int cursor_x = x;
     int cursor_y = y;
@@ -399,11 +417,7 @@ void DrawText(uint8_t* fb, int width, int x, int y, const char* text,
                 bool pixel = (bitmap[bit_idx >> 3] >> (7 - (bit_idx & 7))) & 1;
 
                 if (pixel) {
-                    int px = gx + col;
-                    int py = gy + row;
-                    if (px >= 0 && px < width && py >= 0 && py < height) {
-                        set_pixel(fb, width, px, py, color);
-                    }
+                    write_pixel(gx + col, gy + row);
                 }
             }
         }
@@ -414,7 +428,10 @@ void DrawText(uint8_t* fb, int width, int x, int y, const char* text,
 
 void DrawIcon(uint8_t* fb, int width, int x, int y, const char* icon_code,
               const lv_font_t* font, Color color) {
-    DrawText(fb, width, x, y, icon_code, font, color);
+    // Icons inherit the ambient surface height instead of pinning the clip
+    // to the DrawText default (300), which used to crop later rows when the
+    // active buffer was taller (ebook portrait) or reset the global hint.
+    DrawText(fb, width, x, y, icon_code, font, color, 0);
 }
 
 // ============================================================
@@ -477,6 +494,10 @@ void DrawProgressWithLabel(uint8_t* fb, int width, int x, int y, int w, int h,
 int MeasureTextWidth(const char* text, const lv_font_t* font) {
     if (!text || !font) return 0;
 
+    // Multi-line text: the widest line is the width of the text block
+    // (this is what layout callers need); summing all lines would inflate
+    // bubble/clock width calculations.
+    int max_width = 0;
     int width = 0;
     const char* p = text;
 
@@ -485,7 +506,8 @@ int MeasureTextWidth(const char* text, const lv_font_t* font) {
         if (ch == 0) break;
 
         if (ch == '\n') {
-            // Newline resets width for current line, but we return max width
+            if (width > max_width) max_width = width;
+            width = 0;
             continue;
         }
 
@@ -496,8 +518,9 @@ int MeasureTextWidth(const char* text, const lv_font_t* font) {
             width += font->line_height / 2;  // Unknown char placeholder
         }
     }
+    if (width > max_width) max_width = width;
 
-    return width;
+    return max_width;
 }
 
 int MeasureTextHeight(const lv_font_t* font) {

@@ -195,6 +195,8 @@ input[type=file] { display: none; }
       <input type="text" id="cfgDeviceIp" placeholder="192.168.100.75"></div>
     <div class="field"><label>设备端口</label>
       <input type="text" id="cfgDevicePort" placeholder="80" value="80"></div>
+    <div class="field"><label>设备令牌(在设备「设置」页查看,留空不启用)</label>
+      <input type="text" id="cfgDeviceToken" placeholder="8-64 位十六进制"></div>
     <button class="btn btn-primary" style="margin-top:12px" onclick="saveConfig()">💾 保存</button>
     <div style="font-size:11px;color:#666;margin-top:8px">
       设备换了网络(如带到公司)后,在此填新 IP。点保存后,遥控和传图都会指向新设备。
@@ -279,11 +281,36 @@ const $ = id => document.getElementById(id);
 let currentFile = null, currentRawB64 = null, currentFmt = 'bwry2bpp', convertTimer = null;
 let pages = [], currentPageId = '';
 
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
 function setStatus(msg, type) {
   $('status').className = 'status' + (type ? ' ' + type : '');
-  $('status').innerHTML = msg;
+  $('status').textContent = msg;   // textContent 防 XSS
 }
-function setSpinner(msg) { setStatus('<span class="spinner"></span>' + msg); }
+function setSpinner(msg) {
+  $('status').className = 'status';
+  // 内容固定无插值,仅文案经 esc
+  $('status').innerHTML = '<span class="spinner"></span>' + esc(msg);
+}
+
+// 统一 API 封装:自动带 X-Auth-Token(若服务开启了 NAS_SERVICE_TOKEN 鉴权)
+async function apiFetch(url, opts = {}, _retried = false) {
+  const headers = Object.assign({}, opts.headers || {});
+  const token = localStorage.getItem('nasToken');
+  if (token) headers['X-Auth-Token'] = token;
+  const r = await fetch(url, Object.assign({}, opts, {headers}));
+  if (r.status === 401 && !_retried) {
+    const t = prompt('服务已开启 token 鉴权,请输入 NAS_SERVICE_TOKEN:');
+    if (t === null) throw new Error('未授权(401): 需要 token');
+    localStorage.setItem('nasToken', t);
+    return apiFetch(url, opts, true);
+  }
+  if (r.status === 401) throw new Error('未授权(401): token 缺失或错误');
+  return r;
+}
 
 // Tab 切换
 document.querySelectorAll('.tab').forEach(t => {
@@ -302,7 +329,7 @@ async function checkDevice() {
   $('devStatus').textContent = '检测设备...';
   $('dot').className = 'dot warn';
   try {
-    const r = await fetch('/api/device/status');
+    const r = await apiFetch('/api/device/status');
     const j = await r.json();
     if (!j.reachable) {
       $('dot').className = 'dot offline';
@@ -334,26 +361,36 @@ function renderPages() {
     const icon = icons[p.id]||'📄';
     // board 型页面:显示"详情"角标,点击跳详情页选模板
     // raw 型页面:点击直接切设备页(原有行为)
+    // 插值点全部 esc,事件走 data-* 委托,不拼 inline onclick
     if (p.type === 'board' && p.board_id) {
       return `
-        <div class="page-btn ${p.active?'active':''}" data-id="${p.id}" onclick="location.href='/detail?board=${p.board_id}'">
+        <div class="page-btn ${p.active?'active':''}" data-id="${esc(p.id)}" data-board="${esc(p.board_id)}">
           <span class="icon">${icon}</span>
-          <span class="name">${p.name}</span>
+          <span class="name">${esc(p.name)}</span>
           <span class="badge">详情 ›</span>
         </div>`;
     }
     return `
-      <div class="page-btn ${p.active?'active':''}" data-id="${p.id}" onclick="switchPage('${p.id}')">
+      <div class="page-btn ${p.active?'active':''}" data-id="${esc(p.id)}">
         <span class="icon">${icon}</span>
-        <span class="name">${p.name}</span>
+        <span class="name">${esc(p.name)}</span>
       </div>`;
   }).join('');
+  $('pageGrid').querySelectorAll('.page-btn').forEach(el => {
+    el.onclick = () => {
+      if (el.dataset.board) {
+        location.href = '/detail?board=' + encodeURIComponent(el.dataset.board);
+      } else {
+        switchPage(el.dataset.id);
+      }
+    };
+  });
 }
 
 async function switchPage(id) {
   setSpinner('切换到 ' + id + '...');
   try {
-    const r = await fetch('/api/device/switch_page', {
+    const r = await apiFetch('/api/device/switch_page', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({page: id})
     });
@@ -393,7 +430,7 @@ dropZone.addEventListener('drop', e => {
 $('bingBtn').onclick = async e => {
   e.preventDefault(); setSpinner('抓取 Bing 壁纸...');
   try {
-    const r = await fetch('/api/bing'); const j = await r.json();
+    const r = await apiFetch('/api/bing'); const j = await r.json();
     if (j.error) throw new Error(j.error);
     const bytes = atob(j.image_b64.split(',')[1]);
     const arr = new Uint8Array(bytes.length);
@@ -417,7 +454,7 @@ async function doConvert() {
   ['gamut','sat','exp','shad'].forEach(k => fd.append(k === 'sat' ? 'saturation' : (k === 'exp' ? 'exposure' : (k === 'shad' ? 'shadows' : k)), $(k).value));
   fd.append('bg', $('bg').value);
   try {
-    const r = await fetch('/api/convert', {method: 'POST', body: fd});
+    const r = await apiFetch('/api/convert', {method: 'POST', body: fd});
     const j = await r.json();
     if (j.error) throw new Error(j.error);
     currentRawB64 = j.raw_b64; currentFmt = j.format;
@@ -433,7 +470,7 @@ async function doPush() {
   if (!currentRawB64) return;
   setSpinner('推送到设备...');
   try {
-    const r = await fetch('/api/push', {
+    const r = await apiFetch('/api/push', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({raw_b64: currentRawB64, format: currentFmt})
     });
@@ -459,9 +496,10 @@ function setPreset(name) {
 // ============ 设置 ============
 async function loadConfig() {
   try {
-    const r = await fetch('/api/config'); const j = await r.json();
+    const r = await apiFetch('/api/config'); const j = await r.json();
     $('cfgDeviceIp').value = j.device_ip || '';
     $('cfgDevicePort').value = j.device_port || '80';
+    $('cfgDeviceToken').value = j.device_token || '';
   } catch (e) {}
 }
 async function saveConfig() {
@@ -470,10 +508,13 @@ async function saveConfig() {
   if (!ip) { setStatus('请填设备 IP', 'error'); return; }
   setSpinner('保存中...');
   try {
-    await fetch('/api/config', {
+    const r = await apiFetch('/api/config', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({device_ip: ip, device_port: port})
+      body: JSON.stringify({device_ip: ip, device_port: port,
+                            device_token: $('cfgDeviceToken').value.trim()})
     });
+    const j = await r.json();
+    if (!j.ok && j.error) throw new Error(j.error);
     setStatus('✓ 已保存,新的设备 IP 生效', 'success');
     checkDevice();
   } catch (e) { setStatus('保存失败: ' + e.message, 'error'); }
@@ -484,12 +525,12 @@ let scheduleData = {};
 
 async function loadSchedule() {
   try {
-    const r = await fetch('/api/schedule');
+    const r = await apiFetch('/api/schedule');
     const data = await r.json();
     scheduleData = data.schedules || {};
     renderScheduleList();
   } catch (e) {
-    $('scheduleList').innerHTML = '<div style="color:#ff6b6b;font-size:13px">加载失败: ' + e.message + '</div>';
+    $('scheduleList').innerHTML = '<div style="color:#ff6b6b;font-size:13px">加载失败: ' + esc(e.message) + '</div>';
   }
 }
 
@@ -504,25 +545,26 @@ function renderScheduleList() {
     {v: 60, t: '1 小时'}, {v: 120, t: '2 小时'}, {v: 360, t: '6 小时'},
     {v: 720, t: '12 小时'},
   ];
+  // bid/label/模板 id 全部 esc;onchange 用 scheduleList 上的委托监听
   $('scheduleList').innerHTML = items.map(([bid, cfg]) => {
     const tplOpts = (cfg.templates || []).map(t =>
-      `<option value="${t.id}" ${t.id===cfg.template?'selected':''}>${t.label}</option>`).join('');
+      `<option value="${esc(t.id)}" ${t.id===cfg.template?'selected':''}>${esc(t.label)}</option>`).join('');
     const intOpts = intervals.map(i =>
       `<option value="${i.v}" ${i.v===cfg.interval_min?'selected':''}>${i.t}</option>`).join('');
     const smartTag = cfg.smart ? ' <span style="color:#ffa500;font-size:11px">⭐ 仅交易时段</span>' : '';
     return `
       <div style="background:#2a2a2a;border-radius:8px;padding:10px 12px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-          <span style="font-size:14px;color:#ddd">${cfg.label}${smartTag}</span>
+          <span style="font-size:14px;color:#ddd">${esc(cfg.label || bid)}${smartTag}</span>
           <label style="font-size:13px;color:#888;cursor:pointer">
-            <input type="checkbox" data-bid="${bid}" data-field="enabled" ${cfg.enabled?'checked':''} onchange="onScheduleChange('${bid}')"> 启用
+            <input type="checkbox" data-bid="${esc(bid)}" data-field="enabled" ${cfg.enabled?'checked':''}> 启用
           </label>
         </div>
         <div style="display:flex;gap:8px;font-size:12px">
-          <select data-bid="${bid}" data-field="template" onchange="onScheduleChange('${bid}')" style="flex:1;background:#1a1a1a;color:#ddd;border:1px solid #3a3a3a;border-radius:6px;padding:6px">
+          <select data-bid="${esc(bid)}" data-field="template" style="flex:1;background:#1a1a1a;color:#ddd;border:1px solid #3a3a3a;border-radius:6px;padding:6px">
             ${tplOpts}
           </select>
-          <select data-bid="${bid}" data-field="interval_min" onchange="onScheduleChange('${bid}')" style="flex:1;background:#1a1a1a;color:#ddd;border:1px solid #3a3a3a;border-radius:6px;padding:6px">
+          <select data-bid="${esc(bid)}" data-field="interval_min" style="flex:1;background:#1a1a1a;color:#ddd;border:1px solid #3a3a3a;border-radius:6px;padding:6px">
             ${intOpts}
           </select>
         </div>
@@ -530,9 +572,18 @@ function renderScheduleList() {
   }).join('');
 }
 
+// 委托监听:任一控件变化 → 读回 scheduleData(实时更新,不立即保存)
+$('scheduleList').onchange = e => {
+  const el = e.target;
+  if (!el.dataset || !el.dataset.bid) return;
+  onScheduleChange(el.dataset.bid);
+};
+
 function onScheduleChange(bid) {
   // Read current DOM values into scheduleData (live update, no save yet)
-  document.querySelectorAll(`[data-bid="${bid}"]`).forEach(el => {
+  // 不把 bid 拼进选择器,改为遍历比较,杜绝选择器注入
+  document.querySelectorAll('[data-bid]').forEach(el => {
+    if (el.dataset.bid !== bid) return;
     const field = el.dataset.field;
     if (field === 'enabled') {
       scheduleData[bid][field] = el.checked;
@@ -547,7 +598,7 @@ async function saveSchedule() {
   let ok = 0, fail = 0;
   for (const [bid, cfg] of Object.entries(scheduleData)) {
     try {
-      const r = await fetch('/api/schedule', {
+      const r = await apiFetch('/api/schedule', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
@@ -568,7 +619,7 @@ async function saveSchedule() {
 
 async function loadAiConfig() {
   try {
-    const r = await fetch('/api/ai_config');
+    const r = await apiFetch('/api/ai_config');
     const d = await r.json();
     $('aiProvider').value = d.provider || 'zhipu';
     $('zhipuModel').value = d.zhipu_model || 'glm-5.3-flash';
@@ -606,7 +657,7 @@ async function saveAiConfig() {
   }
   setSpinner('保存 AI 配置...');
   try {
-    const r = await fetch('/api/ai_config', {
+    const r = await apiFetch('/api/ai_config', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body)
     });
@@ -625,7 +676,7 @@ async function saveBirth() {
   if (!y || !m || !d) { setStatus('请填写完整的年月日', 'error'); return; }
   setSpinner('保存出生日期到设备...');
   try {
-    const r = await fetch('/api/device/lifebar_birth', {
+    const r = await apiFetch('/api/device/lifebar_birth', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({y, m, d})
     });

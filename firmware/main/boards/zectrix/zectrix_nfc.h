@@ -26,6 +26,13 @@ public:
     static constexpr uint8_t kUidBlockAddress = 0x00;
     static constexpr uint8_t kUserDataStartBlock = 0x01;
     static constexpr uint8_t kUserDataEndBlock = 0x37;
+    // KNOWN OVERLAP RISK: 0x04 lies INSIDE the user-data block range
+    // [0x01, 0x37], because the real chip memory layout is unconfirmed.
+    // Capacities are intentionally left unchanged: command-area accesses
+    // (kCommandBlockAddress..kUserDataEndBlock) and user-data accesses
+    // (kUserDataStartBlock..) alias the same blocks — user data at offset
+    // >= (0x04 - 0x01) * kBlockSize = 48 clobbers the command area and
+    // vice versa. Do not write both regions concurrently.
     static constexpr uint8_t kCommandBlockAddress = 0x04;
     static constexpr size_t kUserDataCapacity =
         (kUserDataEndBlock - kUserDataStartBlock + 1) * kBlockSize;
@@ -37,7 +44,7 @@ public:
                gpio_num_t power_gpio,
                gpio_num_t fd_gpio,
                int fd_active_level);
-    ~ZectrixNfc() = default;
+    ~ZectrixNfc();
 
     bool Init();
     bool PowerOn();
@@ -59,12 +66,18 @@ public:
     esp_err_t WriteNdef(const std::vector<uint8_t>& message);
     esp_err_t WriteTextNdef(const std::string& text, const std::string& language = "zh");
     esp_err_t WriteUriNdef(const std::string& uri);
+    static std::vector<uint8_t> BuildUriNdefMessage(const std::string& uri);
 
 private:
     static void FieldTaskEntry(void* arg);
     static void FieldIsrHandler(void* arg);
 
     static esp_err_t EnsureIsrServiceInstalled();
+
+    // Removes the FD ISR handler and stops/joins field_task_ so no callback
+    // or task can touch a freed object. Idempotent; used by Init() failure
+    // paths and the destructor.
+    void TeardownFieldMonitoring();
 
     esp_err_t Probe();
     esp_err_t BeginTransferSessionLocked(const char* reason);
@@ -87,6 +100,10 @@ private:
     std::atomic<bool> initialized_{false};
     std::atomic<bool> powered_{false};
     std::atomic<bool> field_present_{false};
+    // FieldTask shutdown handshake: done is set by the owner to request exit,
+    // exited is set by the task right before vTaskDelete(NULL).
+    std::atomic<bool> field_task_done_{false};
+    std::atomic<bool> field_task_exited_{false};
     std::mutex mutex_;
     std::unique_ptr<ScopedI2cBusLock> i2c_session_lock_;
     std::function<void(bool)> field_callback_;

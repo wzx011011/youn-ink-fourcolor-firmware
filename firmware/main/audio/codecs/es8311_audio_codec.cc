@@ -63,6 +63,9 @@ Es8311AudioCodec::Es8311AudioCodec(void* i2c_master_handle, i2c_port_t i2c_port,
 }
 
 Es8311AudioCodec::~Es8311AudioCodec() {
+    // Consistent lock order: data_if_mutex_ -> dev_mutex_.
+    std::lock_guard<std::mutex> lock(data_if_mutex_);
+    std::lock_guard<std::mutex> dev_lock(dev_mutex_);
     ScopedI2cBusLock bus_lock("Es8311AudioCodec::~Es8311AudioCodec");
     esp_codec_dev_delete(dev_);
 
@@ -73,9 +76,15 @@ Es8311AudioCodec::~Es8311AudioCodec() {
 }
 
 void Es8311AudioCodec::UpdateDeviceState() {
+    // Called with data_if_mutex_ held (EnableInput/EnableOutput take it first).
+    // Take dev_mutex_ second so the open/close/delete sequence below cannot
+    // interleave with Read()/Write(), which hold only dev_mutex_.
+    // Lock order: data_if_mutex_ -> dev_mutex_ (never the reverse).
+    std::lock_guard<std::mutex> dev_lock(dev_mutex_);
     ScopedI2cBusLock bus_lock("Es8311AudioCodec::UpdateDeviceState");
     ESP_ERROR_CHECK(bus_lock.status());
-    if ((input_enabled_ || output_enabled_) && dev_ == nullptr) {
+    if ((input_enabled_.load(std::memory_order_acquire) ||
+         output_enabled_.load(std::memory_order_acquire)) && dev_ == nullptr) {
         esp_codec_dev_cfg_t dev_cfg = {
             .dev_type = ESP_CODEC_DEV_TYPE_IN_OUT,
             .codec_if = codec_if_,
@@ -94,7 +103,8 @@ void Es8311AudioCodec::UpdateDeviceState() {
         ESP_ERROR_CHECK(esp_codec_dev_open(dev_, &fs));
         ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(dev_, input_gain_));
         ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(dev_, output_volume_));
-    } else if (!input_enabled_ && !output_enabled_ && dev_ != nullptr) {
+    } else if (!input_enabled_.load(std::memory_order_acquire) &&
+               !output_enabled_.load(std::memory_order_acquire) && dev_ != nullptr) {
         esp_err_t err = esp_codec_dev_close(dev_);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "Failed to close codec device: %s", esp_err_to_name(err));
@@ -103,7 +113,7 @@ void Es8311AudioCodec::UpdateDeviceState() {
         dev_ = nullptr;
     }
     if (pa_pin_ != GPIO_NUM_NC) {
-        int level = output_enabled_ ? 1 : 0;
+        int level = output_enabled_.load(std::memory_order_acquire) ? 1 : 0;
         gpio_hold_dis(pa_pin_);
         gpio_set_level(pa_pin_, pa_inverted_ ? !level : level);
         gpio_hold_en(pa_pin_);
@@ -174,12 +184,16 @@ void Es8311AudioCodec::SetOutputVolume(int volume) {
         volume = 100;
     }
     AudioCodec::SetOutputVolume(volume);
-    if (dev_ != nullptr && output_enabled_) {
-        ScopedI2cBusLock bus_lock("Es8311AudioCodec::SetOutputVolume");
-        ESP_ERROR_CHECK(bus_lock.status());
-        esp_err_t err = esp_codec_dev_set_out_vol(dev_, volume);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to set output volume to %d: %s", volume, esp_err_to_name(err));
+    if (output_enabled_.load(std::memory_order_acquire)) {
+        // Lock order: data_if_mutex_ (held) -> dev_mutex_.
+        std::lock_guard<std::mutex> dev_lock(dev_mutex_);
+        if (dev_ != nullptr) {
+            ScopedI2cBusLock bus_lock("Es8311AudioCodec::SetOutputVolume");
+            ESP_ERROR_CHECK(bus_lock.status());
+            esp_err_t err = esp_codec_dev_set_out_vol(dev_, volume);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to set output volume to %d: %s", volume, esp_err_to_name(err));
+            }
         }
     }
 }
@@ -189,7 +203,7 @@ void Es8311AudioCodec::EnableInput(bool enable) {
     if (codec_if_ == nullptr) {
         return;
     }
-    if (enable == input_enabled_) {
+    if (enable == input_enabled_.load(std::memory_order_acquire)) {
         return;
     }
     AudioCodec::EnableInput(enable);
@@ -201,7 +215,7 @@ void Es8311AudioCodec::EnableOutput(bool enable) {
     if (codec_if_ == nullptr) {
         return;
     }
-    if (enable == output_enabled_) {
+    if (enable == output_enabled_.load(std::memory_order_acquire)) {
         return;
     }
     AudioCodec::EnableOutput(enable);
@@ -209,15 +223,31 @@ void Es8311AudioCodec::EnableOutput(bool enable) {
 }
 
 int Es8311AudioCodec::Read(int16_t* dest, int samples) {
-    if (input_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_read(dev_, (void*)dest, samples * sizeof(int16_t)));
+    // Take ONLY dev_mutex_ here (never data_if_mutex_) so the global lock
+    // order data_if_mutex_ -> dev_mutex_ cannot be inverted.
+    std::lock_guard<std::mutex> dev_lock(dev_mutex_);
+    if (input_enabled_.load(std::memory_order_acquire) && dev_ != nullptr) {
+        esp_err_t err = esp_codec_dev_read(dev_, (void*)dest, samples * sizeof(int16_t));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(err);
+        if (err != ESP_OK) {
+            // Report failure instead of handing back garbage/partial PCM.
+            return 0;
+        }
     }
     return samples;
 }
 
 int Es8311AudioCodec::Write(const int16_t* data, int samples) {
-    if (output_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_write(dev_, (void*)data, samples * sizeof(int16_t)));
+    // Take ONLY dev_mutex_ here (never data_if_mutex_) so the global lock
+    // order data_if_mutex_ -> dev_mutex_ cannot be inverted.
+    std::lock_guard<std::mutex> dev_lock(dev_mutex_);
+    if (output_enabled_.load(std::memory_order_acquire) && dev_ != nullptr) {
+        esp_err_t err = esp_codec_dev_write(dev_, (void*)data, samples * sizeof(int16_t));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(err);
+        if (err != ESP_OK) {
+            // Report failure instead of claiming the PCM was played.
+            return 0;
+        }
     }
     return samples;
 }

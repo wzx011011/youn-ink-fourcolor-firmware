@@ -302,22 +302,10 @@ void WeatherRenderer::Render(uint8_t* fb, int width, int height) {
 }
 
 bool WeatherRenderer::HandleInput(const ButtonEvent& event) {
-    const int max_cards = std::min<int>(4, static_cast<int>(BuildForecastItems(current_data_).size()));
     switch (event.type) {
-        case ButtonEvent::kUpClick:
-            if (max_cards > 0) {
-                page_index_ = std::max(0, page_index_ - 1);
-                needs_full_refresh_ = true;
-                return true;
-            }
-            return false;
-        case ButtonEvent::kDownClick:
-            if (max_cards > 0) {
-                page_index_ = std::min(max_cards - 1, page_index_ + 1);
-                needs_full_refresh_ = true;
-                return true;
-            }
-            return false;
+        // Note: UP/DN paging was removed — Render() always draws all four
+        // forecast cards, so the old handler triggered a 10s+ full e-ink
+        // refresh with zero visual change on every keypress.
         case ButtonEvent::kUpLongPress:
         case ButtonEvent::kDownLongPress:
         case ButtonEvent::kBootLongPress:

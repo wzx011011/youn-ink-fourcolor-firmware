@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <ctime>
 #include <algorithm>
+#include <mutex>
 
 namespace holiday_fetcher {
 
@@ -34,6 +35,9 @@ static constexpr int kMaxResponseSize = 8192;
 static constexpr int kCacheSlots = 2;
 static HolidayCache s_caches[kCacheSlots] = {};
 static bool s_loaded[kCacheSlots] = {};
+// Protects s_caches/s_loaded: writers are Init()/Fetch() (online-data task),
+// readers are the UI task.
+static std::mutex s_cache_mutex;
 
 // HTTP response buffer
 static char s_resp_buf[kMaxResponseSize + 1] = {0};
@@ -48,6 +52,19 @@ static esp_err_t HttpEvent(esp_http_client_event_t* evt) {
         }
     }
     return ESP_OK;
+}
+
+/**
+ * @brief Find the first occurrence of `needle` within [begin, end), or nullptr.
+ * Bounded alternative to strstr() so key/value lookups cannot run past the
+ * current entry's closing brace.
+ */
+static const char* FindWithin(const char* begin, const char* end, const char* needle) {
+    const size_t needle_len = strlen(needle);
+    for (const char* p = begin; end >= begin && p + needle_len <= end; ++p) {
+        if (memcmp(p, needle, needle_len) == 0) return p;
+    }
+    return nullptr;
 }
 
 /**
@@ -74,15 +91,22 @@ static bool ParseResponse(int year, const char* json, int len, HolidayCache* cac
     char date_pattern[16];
     const char* pos = obj_start + 1;
 
-    while (cache->entry_count < kMaxHolidayEntries && pos < json + len) {
+    while (pos < json + len) {
+        if (cache->entry_count >= kMaxHolidayEntries) {
+            ESP_LOGW(kTag, "Holiday entries truncated at %d for %d", kMaxHolidayEntries, year);
+            break;
+        }
+
         // Find next date string "YYYY-MM-DD"
         snprintf(date_pattern, sizeof(date_pattern), "\"%04d-", year);
         const char* date_str = strstr(pos, date_pattern);
         if (!date_str || date_str >= json + len - 13) break;
 
-        // Parse MM-DD
+        // Parse MM-DD. date_str points at the OPENING QUOTE of "YYYY-MM-DD",
+        // so the month starts at +6 (after `"YYYY-`). Using +5 landed on the
+        // '-' separator and made every entry fail to parse.
         int m = 0, d = 0;
-        if (sscanf(date_str + 5, "%d-%d", &m, &d) != 2) {
+        if (sscanf(date_str + 6, "%d-%d", &m, &d) != 2) {
             pos = date_str + 1;
             continue;
         }
@@ -97,40 +121,46 @@ static bool ParseResponse(int year, const char* json, int len, HolidayCache* cac
             pos = date_str + 1;
             continue;
         }
+        // Bound all key/value lookups to this entry's closing brace so they
+        // cannot pick up fields belonging to the next entry.
+        const char* obj_end = strchr(obj, '}');
+        if (!obj_end || obj_end >= json + len) {
+            pos = date_str + 1;
+            continue;
+        }
 
         // Find "rest" value
-        const char* rest_key = strstr(obj, "\"rest\"");
         int is_rest = 1;  // default to rest
-        if (rest_key && rest_key < json + len) {
-            const char* colon = strchr(rest_key, ':');
-            if (colon && colon < json + len) {
+        const char* rest_key = FindWithin(obj, obj_end, "\"rest\"");
+        if (rest_key) {
+            const char* colon = FindWithin(rest_key, obj_end, ":");
+            if (colon) {
                 is_rest = atoi(colon + 1);
             }
         }
 
-        // Find "name" value
-        const char* name_key = strstr(obj, "\"name\"");
-        const char* name = "";
-        if (name_key && name_key < json + len) {
-            const char* q1 = strchr(name_key, ':');
-            if (q1) {
-                const char* q2 = strchr(q1, '"');
-                if (q2 && q2 < json + len) {
+        // Find "name" value (stack buffer; no shared static state)
+        char name_buf[32];
+        name_buf[0] = '\0';
+        const char* name_key = FindWithin(obj, obj_end, "\"name\"");
+        if (name_key) {
+            const char* colon = FindWithin(name_key, obj_end, ":");
+            if (colon) {
+                const char* q2 = FindWithin(colon, obj_end, "\"");
+                if (q2) {
                     q2++;  // skip opening quote
-                    const char* q3 = strchr(q2, '"');
-                    if (q3 && q3 < json + len && q3 > q2) {
-                        static char name_buf[32];
-                        int nl = std::min((int)(q3 - q2), 31);
+                    const char* q3 = FindWithin(q2, obj_end, "\"");
+                    if (q3 && q3 > q2) {
+                        int nl = std::min((int)(q3 - q2), (int)sizeof(name_buf) - 1);
                         memcpy(name_buf, q2, nl);
                         name_buf[nl] = '\0';
-                        name = name_buf;
                     }
                 }
             }
         }
 
         // Skip entries that have no name and are normal rest days
-        if (name[0] == '\0' && is_rest) {
+        if (name_buf[0] == '\0' && is_rest) {
             pos = obj + 1;
             continue;
         }
@@ -141,7 +171,7 @@ static bool ParseResponse(int year, const char* json, int len, HolidayCache* cac
         e.month = (int8_t)m;
         e.day = (int8_t)d;
         e.is_rest = (is_rest != 0);
-        snprintf(e.name, sizeof(e.name), "%.15s", name);
+        snprintf(e.name, sizeof(e.name), "%.15s", name_buf);
 
         pos = obj + 1;
     }
@@ -239,15 +269,17 @@ static bool LoadCache(int year, HolidayCache* cache) {
     return true;
 }
 
-static int FindCacheIndex(int year) {
+static int FindCacheIndexLocked(int year) {
+    // Caller must hold s_cache_mutex.
     for (int i = 0; i < kCacheSlots; ++i) {
         if (s_loaded[i] && s_caches[i].year == year) return i;
     }
     return -1;
 }
 
-static int AcquireCacheIndex(int year) {
-    const int existing = FindCacheIndex(year);
+static int AcquireCacheIndexLocked(int year) {
+    // Caller must hold s_cache_mutex.
+    const int existing = FindCacheIndexLocked(year);
     if (existing >= 0) return existing;
 
     for (int i = 0; i < kCacheSlots; ++i) {
@@ -268,13 +300,30 @@ bool Init() {
     localtime_r(&now, &tm_buf);
     int year = tm_buf.tm_year + 1900;
 
-    s_loaded[0] = LoadCache(year, &s_caches[0]);
-    s_loaded[1] = LoadCache(year + 1, &s_caches[1]);
+    HolidayCache cache0 = {};
+    HolidayCache cache1 = {};
+    const bool loaded0 = LoadCache(year, &cache0);
+    const bool loaded1 = LoadCache(year + 1, &cache1);
 
-    return s_loaded[0] || s_loaded[1];
+    {
+        std::lock_guard<std::mutex> lock(s_cache_mutex);
+        s_caches[0] = cache0;
+        s_caches[1] = cache1;
+        s_loaded[0] = loaded0;
+        s_loaded[1] = loaded1;
+    }
+
+    return loaded0 || loaded1;
 }
 
 bool Fetch(int year) {
+    // Before SNTP sync time() yields 1970; never burn a cache slot (or NVS)
+    // on a garbage year. Safe to call again later once the clock is set.
+    if (year < 2020) {
+        ESP_LOGW(kTag, "Refusing to fetch holiday data for invalid year %d", year);
+        return false;
+    }
+
     s_resp_len = 0;
     memset(s_resp_buf, 0, sizeof(s_resp_buf));
 
@@ -321,48 +370,60 @@ bool Fetch(int year) {
         return false;
     }
 
-    const int cache_index = AcquireCacheIndex(year);
-    s_caches[cache_index] = parsed;
-    s_loaded[cache_index] = true;
-    SaveCache(s_caches[cache_index]);
+    {
+        std::lock_guard<std::mutex> lock(s_cache_mutex);
+        const int cache_index = AcquireCacheIndexLocked(year);
+        s_caches[cache_index] = parsed;
+        s_loaded[cache_index] = true;
+    }
+    SaveCache(parsed);
     return true;
 }
 
-static const HolidayEntry* FindEntry(int year, int month, int day) {
-    const int cache_index = FindCacheIndex(year);
-    if (cache_index < 0) return nullptr;
+static bool FindEntry(int year, int month, int day, HolidayEntry* out) {
+    // Copy the matching entry out under the lock so the UI thread never
+    // holds (or dereferences) a pointer into a cache that Fetch() replaces.
+    std::lock_guard<std::mutex> lock(s_cache_mutex);
+    const int cache_index = FindCacheIndexLocked(year);
+    if (cache_index < 0) return false;
 
     const HolidayCache& cache = s_caches[cache_index];
     for (int i = 0; i < cache.entry_count; i++) {
         const HolidayEntry& e = cache.entries[i];
         if (e.month == month && e.day == day) {
-            return &e;
+            *out = e;
+            return true;
         }
     }
-    return nullptr;
+    return false;
 }
 
 bool IsHoliday(int year, int month, int day) {
-    const HolidayEntry* e = FindEntry(year, month, day);
-    return e != nullptr && e->is_rest;
+    HolidayEntry e;
+    return FindEntry(year, month, day, &e) && e.is_rest;
 }
 
 bool IsMakeupWorkday(int year, int month, int day) {
-    const HolidayEntry* e = FindEntry(year, month, day);
-    return e != nullptr && !e->is_rest;
+    HolidayEntry e;
+    return FindEntry(year, month, day, &e) && !e.is_rest;
 }
 
 const char* GetHolidayName(int year, int month, int day) {
-    const HolidayEntry* e = FindEntry(year, month, day);
-    if (e && e->is_rest && e->name[0] != '\0') {
-        return e->name;
+    HolidayEntry e;
+    if (!FindEntry(year, month, day, &e)) {
+        return nullptr;
     }
-    return nullptr;
+    if (!e.is_rest || e.name[0] == '\0') {
+        return nullptr;
+    }
+    static char s_name_buf[sizeof(e.name)];
+    snprintf(s_name_buf, sizeof(s_name_buf), "%s", e.name);
+    return s_name_buf;
 }
 
 const char* GetMakeupLabel(int year, int month, int day) {
-    const HolidayEntry* e = FindEntry(year, month, day);
-    if (e && !e->is_rest) {
+    HolidayEntry e;
+    if (FindEntry(year, month, day, &e) && !e.is_rest) {
         return "班";
     }
     return nullptr;

@@ -25,7 +25,7 @@ namespace holiday_fetcher {
 /**
  * @brief Maximum holiday/adjustment entries per year
  */
-static constexpr int kMaxHolidayEntries = 50;
+static constexpr int kMaxHolidayEntries = 64;
 
 /**
  * @brief Single holiday/adjustment entry

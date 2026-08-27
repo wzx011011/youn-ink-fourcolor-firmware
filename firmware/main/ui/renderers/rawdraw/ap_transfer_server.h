@@ -46,6 +46,12 @@ public:
     bool IsApMode() const { return mode_.load() == TransferMode::kAp; }
     bool IsLanMode() const { return mode_.load() == TransferMode::kLan; }
 
+    // Device access token for LAN-mode HTTP requests. Created once and kept
+    // in NVS ("auth" namespace). Requests in LAN mode must present it via the
+    // X-Device-Token header (or ?token= query). AP mode is exempt: joining
+    // the physical AP already implies proximity. Shown on the settings page.
+    static std::string GetOrCreateAuthToken();
+
     // State callback
     enum ServerState {
         kStopped,
@@ -120,6 +126,10 @@ private:
     const std::string& GetApIp() const { return ap_ip_; }
     bool StartHttpServer();
     static void StartTask(void* arg);
+
+    // Returns true when the request may proceed. Enforces the device token
+    // for state-changing and private reads while in LAN mode.
+    static bool CheckRequestAuthorized(httpd_req_t* req);
 
     // HTTP handlers
     static esp_err_t IndexHandler(httpd_req_t* req);

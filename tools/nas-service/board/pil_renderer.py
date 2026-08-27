@@ -96,8 +96,12 @@ def _find_font():
         if Path(p).exists():
             logger.info("Using font: %s", p)
             return p
-    logger.warning("No CJK font found, text will be boxes")
-    return None
+    # fail-fast:静默返回 None 会退到像素默认字体,中文全是豆腐块还被
+    # 正常推上屏。宁可启动失败,也要让部署者立刻看到缺字体。
+    raise RuntimeError(
+        "未找到 CJK 字体,中文将渲染为方块。请安装 fonts-noto-cjk"
+        "(Docker 镜像已自带),或把 NotoSansCJK-Regular.ttc 放到以上候选路径之一"
+    )
 
 
 # Singleton

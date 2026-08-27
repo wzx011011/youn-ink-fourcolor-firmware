@@ -4,10 +4,12 @@
 #include <esp_adc/adc_cali_scheme.h>
 #include <esp_adc/adc_oneshot.h>
 #include <esp_log.h>
+#include <esp_mac.h>
 #include <esp_timer.h>
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 
 #include "FT/factory_test_service.h"
@@ -66,11 +68,13 @@ public:
         : up_button_(kBoardUpButtonGpio, false, kNavLongPressMs),
           down_button_(kBoardDownButtonGpio, false, kNavLongPressMs),
           confirm_button_(kBoardConfirmButtonGpio, false, kNavLongPressMs) {
+        // ChargeStatus must be initialized before InitializePower(): the power
+        // BSP starts PowerLedTask, whose first action is charge_status_->Tick().
+        InitializeChargeStatus();
         InitializePower();
         InitializeI2c();
         InitializeRtc();
         InitializeNfc();
-        InitializeChargeStatus();
         InitializeLcdDisplay();
         InitializeButtons();
         BindFactoryTestCallbacks();
@@ -110,7 +114,17 @@ public:
 
         WifiManagerConfig config;
         config.ssid_prefix = "ZecTrix";
-        config.ap_password = "";  // Open AP — no password needed for easy config
+        // Derive the config-AP password from the device softAP MAC so a nearby
+        // device cannot connect to an open network and alter WiFi/OTA settings.
+        // The password is still shown on the config page (GetApPassword()).
+        uint8_t ap_mac[6] = {0};
+        if (esp_read_mac(ap_mac, ESP_MAC_WIFI_SOFTAP) != ESP_OK) {
+            ESP_LOGW(kTag, "esp_read_mac failed, falling back to default AP password");
+        }
+        char ap_password[16];
+        snprintf(ap_password, sizeof(ap_password), "ink%02x%02x%02x%02x",
+                 ap_mac[2], ap_mac[3], ap_mac[4], ap_mac[5]);
+        config.ap_password = ap_password;
         config.language = "zh-CN";
         if (!WifiManager::GetInstance().Initialize(config)) {
             ESP_LOGE(kTag, "WiFi manager init failed");
@@ -213,6 +227,21 @@ public:
         return R"({"mode":"gallery"})";
     }
 
+    // Called by the application right before esp_deep_sleep_start().
+    // Powers down the EPD and audio rails and enables deep-sleep GPIO hold so
+    // the latched levels (EPD power low, audio power low, VBAT latch high,
+    // LED pin) survive deep sleep. On ESP32-S3 a digital GPIO hold only
+    // persists through deep sleep when gpio_deep_sleep_hold_en() was called.
+    // Idempotent: safe to call multiple times.
+    void PrepareForDeepSleep() override {
+        if (power_ != nullptr) {
+            power_->PowerEpdOff();
+            power_->PowerAudioOff();
+        }
+        gpio_deep_sleep_hold_en();
+        ESP_LOGI(kTag, "Prepared for deep sleep (EPD/audio off, sleep holds enabled)");
+    }
+
     void SetNetworkEventCallback(NetworkEventCallback callback) override {
         network_event_callback_ = callback;
     }
@@ -272,7 +301,27 @@ private:
         power_->VbatPowerOn();
         power_->PowerAudioOn();
         power_->PowerEpdOn();
+
+        // VBAT_PWR_GPIO doubles as the power key (shared with the DOWN button).
+        // Configure it as input with pull-up before reading, otherwise the
+        // level is undefined on first boot. Wait (bounded) for the user to
+        // release the key so a stuck button cannot stall boot forever.
+        gpio_config_t pwr_key_cfg = {};
+        pwr_key_cfg.intr_type = GPIO_INTR_DISABLE;
+        pwr_key_cfg.mode = GPIO_MODE_INPUT;
+        pwr_key_cfg.pin_bit_mask = 1ULL << VBAT_PWR_GPIO;
+        pwr_key_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+        pwr_key_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_config(&pwr_key_cfg));
+
+        constexpr int64_t kPowerKeyReleaseTimeoutMs = 5000;
+        const int64_t wait_start_ms = GetNowMs();
         while (!gpio_get_level(VBAT_PWR_GPIO)) {
+            if (GetNowMs() - wait_start_ms >= kPowerKeyReleaseTimeoutMs) {
+                ESP_LOGW(kTag, "Power key still held after %lld ms, booting anyway",
+                         static_cast<long long>(GetNowMs() - wait_start_ms));
+                break;
+            }
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
@@ -494,7 +543,24 @@ private:
         });
 
         factory_test.SetShutdownCallback([this]() {
+            // Give an in-flight EPD refresh up to 30s to reach idle so the
+            // panel is never cut off mid-refresh, then power down the EPD and
+            // audio rails before killing main power.
+            if (display_ != nullptr) {
+                constexpr int64_t kRefreshIdleTimeoutMs = 30000;
+                const int64_t wait_start_ms = GetNowMs();
+                while (display_->IsRefreshPending()) {
+                    if (GetNowMs() - wait_start_ms >= kRefreshIdleTimeoutMs) {
+                        ESP_LOGW(kTag, "EPD refresh still pending after %lld ms, forcing power off",
+                                 static_cast<long long>(GetNowMs() - wait_start_ms));
+                        break;
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                }
+            }
             if (power_ != nullptr) {
+                power_->PowerEpdOff();
+                power_->PowerAudioOff();
                 power_->VbatPowerOff();
             }
         });

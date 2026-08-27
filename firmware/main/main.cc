@@ -6,6 +6,8 @@
 #include <esp_event.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
+#include <esp_ota_ops.h>
+#include <esp_partition.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -35,6 +37,25 @@ static void LogNvsStats() {
 
 extern "C" void app_main(void)
 {
+    // OTA rollback is enabled in sdkconfig. Without this call the bootloader
+    // treats the freshly-flashed app as "pending verify" and silently rolls
+    // back to the other slot after a few reboots — the running firmware then
+    // reverts to an old build with no visible error. Mark this app valid as
+    // the very first thing we do.
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+    {
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        if (running) {
+            esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+            if (esp_ota_get_state_partition(running, &state) == ESP_OK &&
+                state != ESP_OTA_IMG_VALID) {
+                esp_err_t ota_err = esp_ota_mark_app_valid_cancel_rollback();
+                ESP_LOGI(TAG, "OTA app marked valid (%s)", esp_err_to_name(ota_err));
+            }
+        }
+    }
+#endif
+
     // Some soft/external reset paths leave the Wi-Fi RF state dirty until the
     // next hardware-equivalent reset. For those reset reasons only, perform a
     // brief deep-sleep round-trip once to come back with clean radio state.

@@ -130,7 +130,7 @@ void EbookRenderer::RenderReaderPage(uint8_t* fb, int width, int height, int con
     const Color text = theme.ColorFor(ThemeToken::TextPrimary);
     const Color secondary = theme.ColorFor(ThemeToken::TextSecondary);
 
-    if (reader_content_.empty()) {
+    if (reader_lines_.empty()) {
         const char* empty_hint = "文件为空或读取失败";
         const int hint_w = MeasureTextWidth(empty_hint, font_);
         DrawText(fb, width, (width - hint_w) / 2,
@@ -139,83 +139,32 @@ void EbookRenderer::RenderReaderPage(uint8_t* fb, int width, int height, int con
         DrawText(fb, width, 24,
                  InkCenteredTextTopY(font_, "请重新推送 TXT 后再打开", content_y + 74, 0),
                  "请重新推送 TXT 后再打开", font_, secondary, height);
-    } else {
-        const int chars_per_page = CharsPerPage();
-        int start_char = current_page_ * chars_per_page;
-        int end_char = std::min(start_char + chars_per_page, static_cast<int>(reader_content_.size()));
+        return;
+    }
 
-        std::string page_text = reader_content_.substr(start_char, end_char - start_char);
-        ESP_LOGI(kTag, "RenderReader file=%s portrait=%d bytes=%u page=%d/%d page_bytes=%u",
-                 reader_filename_.c_str(),
-                 portrait_reader_ ? 1 : 0,
-                 static_cast<unsigned>(reader_content_.size()),
-                 current_page_ + 1,
-                 total_pages_,
-                 static_cast<unsigned>(page_text.size()));
+    ESP_LOGI(kTag, "RenderReader file=%s portrait=%d bytes=%u lines=%u page=%d/%d lines/page=%d",
+             reader_filename_.c_str(),
+             portrait_reader_ ? 1 : 0,
+             static_cast<unsigned>(reader_content_.size()),
+             static_cast<unsigned>(reader_lines_.size()),
+             current_page_ + 1,
+             total_pages_,
+             max_lines_);
 
-        // Wrap text into display lines first (handles \n and word-wrap)
-        const int margin_x = 14;
-        const int max_line_width = width - margin_x * 2;
-        std::vector<std::string> display_lines;
+    const int margin_x = 14;
+    const int line_gap = 3;
+    const int line_step = line_box_h_ + line_gap;
+    const int first_line = current_page_ * max_lines_;
+    const int visible = std::min(max_lines_,
+                                 static_cast<int>(reader_lines_.size()) - first_line);
 
-        const char* p = page_text.c_str();
-        std::string current_line;
-
-        while (*p) {
-            if (*p == '\n') {
-                display_lines.push_back(current_line.empty() ? std::string(" ") : current_line);
-                current_line.clear();
-                ++p;
-                continue;
-            }
-
-            const char* char_start = p;
-            if ((*p & 0x80) == 0) { p++; }
-            else if ((*p & 0xE0) == 0xC0) { p += 2; }
-            else if ((*p & 0xF0) == 0xE0) { p += 3; }
-            else if ((*p & 0xF8) == 0xF0) { p += 4; }
-            else { p++; }
-
-            std::string next_line = current_line;
-            next_line.append(char_start, p - char_start);
-
-            if (MeasureTextWidth(next_line.c_str(), font_) > max_line_width) {
-                display_lines.push_back(current_line);
-                current_line = std::string(char_start, p - char_start);
-            } else {
-                current_line = next_line;
-            }
-        }
-        if (!current_line.empty()) {
-            display_lines.push_back(current_line);
-        }
-        if (display_lines.empty()) {
-            display_lines.push_back(" ");
-        }
-
-        int max_ink_h = 0;
-        for (const auto& line : display_lines) {
-            const TextInkBounds ink = MeasureTextInkBounds(font_, line.c_str());
-            max_ink_h = std::max(max_ink_h, ink.valid ? ink.height : static_cast<int>(font_->line_height));
-        }
-
-        // Same lesson as Chat/Settings: do not use font->line_height as the
-        // visible text height. The SourceHan line box is taller than the ink,
-        // and treating its top as DrawText y makes multi-line TXT pages look
-        // overlapped or glued to the previous row on the 1bpp panel.
-        const int line_box_h = std::max(max_ink_h + 6, 22);
-        const int line_gap = 3;
-        const int line_step = line_box_h + line_gap;
-        const int max_lines = content_h / line_step;
-        int visible = std::min(static_cast<int>(display_lines.size()), max_lines);
-
-        for (int i = 0; i < visible; ++i) {
-            const int line_box_y = content_y + i * line_step;
-            DrawText(fb, width, margin_x,
-                     InkCenteredTextTopYInBox(font_, display_lines[i].c_str(),
-                                             line_box_y, line_box_h, 0),
-                     display_lines[i].c_str(), font_, text, height);
-        }
+    for (int i = 0; i < visible; ++i) {
+        const ReaderLine& line = reader_lines_[first_line + i];
+        const int line_box_y = content_y + i * line_step;
+        DrawText(fb, width, margin_x,
+                 InkCenteredTextTopYInBox(font_, line.text.c_str(),
+                                         line_box_y, line_box_h_, 0),
+                 line.text.c_str(), font_, text, height);
     }
 }
 
@@ -336,7 +285,7 @@ void EbookRenderer::OpenFile(const std::string& filename, const std::string& con
     reader_mode_ = true;
     portrait_reader_ = false;
     current_page_ = 0;
-    CalcPages();
+    BuildReaderLines();
     needs_full_refresh_ = true;
 }
 
@@ -344,23 +293,110 @@ void EbookRenderer::CloseReader() {
     reader_mode_ = false;
     portrait_reader_ = false;
     reader_content_.clear();
+    reader_lines_.clear();
     reader_filename_.clear();
     current_page_ = 0;
     total_pages_ = 0;
     needs_full_refresh_ = true;
 }
 
-void EbookRenderer::CalcPages() {
-    if (reader_content_.empty()) {
-        total_pages_ = 1;
+void EbookRenderer::ReaderContentArea(int& content_y, int& content_h) const {
+    if (portrait_reader_) {
+        content_y = 12;
+        content_h = 400 - content_y - 24;
     } else {
-        const int chars_per_page = CharsPerPage();
-        total_pages_ = (static_cast<int>(reader_content_.size()) + chars_per_page - 1) / chars_per_page;
+        content_y = Style::kStatusBarHeight + kContentTopGap;
+        content_h = height_ - content_y - 4;
     }
 }
 
-int EbookRenderer::CharsPerPage() const {
-    return portrait_reader_ ? kPortraitCharsPerPage : kLandscapeCharsPerPage;
+int EbookRenderer::ReaderWrapWidth(int width) const {
+    const int margin_x = 14;
+    return (portrait_reader_ ? 300 : width) - margin_x * 2;
+}
+
+void EbookRenderer::BuildReaderLines() {
+    reader_lines_.clear();
+    line_box_h_ = 24;
+    max_lines_ = 1;
+    total_pages_ = 1;
+
+    if (reader_content_.empty()) {
+        return;
+    }
+
+    // Wrap the whole file into display lines for the current orientation.
+    // The walk advances one UTF-8 code point at a time, so line boundaries
+    // never split a multi-byte character (the old byte-count pagination did).
+    const int max_line_width = ReaderWrapWidth(width_);
+    reader_lines_.reserve(64);
+    std::string current_line;
+    int line_offset = 0;
+
+    const char* p = reader_content_.c_str();
+    while (*p) {
+        if (*p == '\n' || *p == '\r') {
+            reader_lines_.push_back({current_line.empty() ? std::string(" ") : current_line,
+                                     line_offset});
+            current_line.clear();
+            if (*p == '\r' && p[1] == '\n') {
+                line_offset = static_cast<int>(p + 2 - reader_content_.c_str());
+                p += 2;
+            } else {
+                line_offset = static_cast<int>(p + 1 - reader_content_.c_str());
+                ++p;
+            }
+            continue;
+        }
+
+        const char* char_start = p;
+        if ((*p & 0x80) == 0) { p++; }
+        else if ((*p & 0xE0) == 0xC0) { p += 2; }
+        else if ((*p & 0xF0) == 0xE0) { p += 3; }
+        else if ((*p & 0xF8) == 0xF0) { p += 4; }
+        else { p++; }
+
+        std::string next_line = current_line;
+        next_line.append(char_start, p - char_start);
+
+        if (MeasureTextWidth(next_line.c_str(), font_) > max_line_width) {
+            if (current_line.empty()) {
+                // Single character wider than the line box: emit it alone
+                // instead of looping forever.
+                reader_lines_.push_back({next_line, line_offset});
+                line_offset = static_cast<int>(p - reader_content_.c_str());
+            } else {
+                reader_lines_.push_back({current_line, line_offset});
+                line_offset = static_cast<int>(char_start - reader_content_.c_str());
+                current_line = std::string(char_start, p - char_start);
+            }
+        } else {
+            current_line = next_line;
+        }
+    }
+    if (!current_line.empty() || reader_lines_.empty()) {
+        reader_lines_.push_back({current_line.empty() ? std::string(" ") : current_line,
+                                 line_offset});
+    }
+
+    // Same lesson as Chat/Settings: do not use font->line_height as the
+    // visible text height — the SourceHan line box is taller than the ink and
+    // multi-line pages would look overlapped. Use the tallest ink of the file
+    // so pagination and rendering agree on the line step.
+    int max_ink_h = 0;
+    for (const auto& line : reader_lines_) {
+        const TextInkBounds ink = MeasureTextInkBounds(font_, line.text.c_str());
+        max_ink_h = std::max(max_ink_h, ink.valid ? ink.height : static_cast<int>(font_->line_height));
+    }
+    line_box_h_ = std::max(max_ink_h + 6, 22);
+
+    int content_y = 0;
+    int content_h = 0;
+    ReaderContentArea(content_y, content_h);
+    const int line_step = line_box_h_ + 3;
+    max_lines_ = std::max(1, content_h / line_step);
+    total_pages_ = std::max(1,
+        (static_cast<int>(reader_lines_.size()) + max_lines_ - 1) / max_lines_);
 }
 
 void EbookRenderer::SetPortraitReader(bool portrait) {
@@ -368,13 +404,24 @@ void EbookRenderer::SetPortraitReader(bool portrait) {
         needs_full_refresh_ = true;
         return;
     }
-    const int old_chars_per_page = CharsPerPage();
-    const int current_offset = std::max(0, current_page_) * old_chars_per_page;
-    portrait_reader_ = portrait;
-    CalcPages();
-    current_page_ = total_pages_ > 0
-        ? std::min(total_pages_ - 1, current_offset / CharsPerPage())
+    // Keep the reading position across the orientation change: remember the
+    // content offset of the current page's first line, re-wrap for the new
+    // width, then jump to the page containing the closest line at or before
+    // that offset.
+    const int keep_offset = (current_page_ >= 0 && current_page_ * max_lines_ <
+                             static_cast<int>(reader_lines_.size()))
+        ? reader_lines_[current_page_ * max_lines_].offset
         : 0;
+    portrait_reader_ = portrait;
+    BuildReaderLines();
+    int target_line = 0;
+    for (int i = static_cast<int>(reader_lines_.size()) - 1; i >= 0; --i) {
+        if (reader_lines_[i].offset <= keep_offset) {
+            target_line = i;
+            break;
+        }
+    }
+    current_page_ = std::min(total_pages_ - 1, target_line / max_lines_);
     needs_full_refresh_ = true;
 }
 

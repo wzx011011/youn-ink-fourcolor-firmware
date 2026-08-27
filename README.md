@@ -1,199 +1,119 @@
 # Youn Ink Four Color
 
-这是一个面向 ESP32-S3 墨水屏设备的个人 AI 助手项目。当前主线由三部分组成：ESP32 固件、Python 后端服务、以及图片/待办/设备管理页面。
-
-项目重点不是一个通用 npm 包，而是一套可以真实运行在墨水屏设备上的系统：语音对话、TTS 播放、待办同步、天气/新闻/日历/电子书/相册页面、AP 传图、OTA 固件管理，以及适配四色屏的 RawDraw UI。
+面向 ESP32-S3 墨水屏设备的四色电子墨水屏系统。整条链路是：**NAS 上的 Flask 服务做图片转换与看板渲染 → 通过局域网 HTTP 推送给 ESP32-S3 设备 → 设备以 2bpp BWRY 四色刷屏显示**；手机浏览器访问 NAS 页面即可传图、遥控设备页面、配置定时推屏和 AI 对话。
 
 ## 2BP 四色图像链路
 
 ![Youn Ink Four Color 2BP BWRY architecture](README-2bp-architecture.png)
 
-相册图片可由 PC/NAS 管理端或设备 AP 页面进入服务端，转换为 `2BP BWRY`（黑、白、红、黄）后通过 Wi-Fi 推送到 ESP32-S3 四色墨水屏。本仓库的 2BP 四色链路与 NOTE4 的 4BP 黑白灰阶相册独立维护：面板颜色、像素格式和刷新驱动均不同。
-
-## 当前状态
-
-- 后端已经切换为 `server/` 下的 Python 服务，根目录旧 Node `scripts/` 已删除。
-- 固件主界面使用 RawDraw 渲染，默认按四色屏设计，同时保留 1bpp 黑白屏兼容。
-- 主题暂时只保留一个默认视觉方向：偏任天堂感的四色主题，强调红、黄、黑、白的语义使用。
-- 图片传输支持 1bpp 黑白与 2bpp 四色 BWRY 两种格式。
-- 根目录 `.gitignore` 已排除构建产物、日志、pid、数据库、本地配置和密钥文件。
+任意来源的图片（手机上传、Bing 壁纸、NAS 照片目录）在 NAS 侧经 `epaper-dithering`（gamut compression 色域压缩 + 抖动）转换为 `2BP BWRY`（黑、白、红、黄，400×300，30000 字节）后，通过 Wi-Fi POST 到设备的 `/upload` 接口。本仓库的 2BP 四色链路与 NOTE4 的 4BP 黑白灰阶相册独立维护：面板颜色、像素格式和刷新驱动均不同。
 
 ## 目录结构
 
 ```text
 .
-├── firmware/        ESP32-IDF 固件，RawDraw UI、页面渲染、屏幕驱动、AP 传图
-├── server/          Python 后端，WebSocket 对话、TTS、Discovery、图片推送、OTA API
-├── frontend/        管理前端源码，使用独立的 package/pnpm 工作流
-├── docs/            历史设计文档和实现记录
-├── documents/       项目资料
-└── package.json     仅保留仓库级辅助命令，不再作为旧 Node 服务入口
-```
-
-注意：`firmware/scripts/` 和 `frontend/scripts/` 仍然有用，分别属于固件工具和前端工具；删除的是根目录历史遗留的 `scripts/`。
-
-## 后端服务
-
-后端入口是 `server/llmserve.py`，推荐通过 `server/start.sh` 管理。服务默认端口：
-
-| 端口 | 协议 | 用途 |
-| --- | --- | --- |
-| `9001` | WebSocket | ESP32 语音、LLM、TTS、同步消息 |
-| `8766` | UDP | 设备发现 |
-| `8766` | HTTP | 图片推送、设备图片管理、OTA API |
-| `8090` | HTTP | 独立管理服务，可选 |
-
-### 安装依赖
-
-```bash
-cd server
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### 启动服务
-
-```bash
-export DASHSCOPE_API_KEY=你的百炼APIKey
-cd server
-./start.sh start
-```
-
-常用命令：
-
-```bash
-cd server
-./start.sh status
-./start.sh logs
-./start.sh restart
-./start.sh stop
-```
-
-也可以从仓库根目录调用：
-
-```bash
-npm run server:start
-npm run server:status
-npm run server:logs
-```
-
-### 本地模拟设备
-
-```bash
-cd server
-python3 mock_client.py --server ws://127.0.0.1:9001
-```
-
-## 图片和设备管理
-
-图片 HTTP API 由 `server/push_image.py` 挂到 `8766` 端口。它支持：
-
-- 上传图片文件并转换后推送到设备。
-- 选择 `1bpp` 黑白格式或 `2bpp` 四色 BWRY 格式。
-- 查询设备图片列表。
-- 删除设备图片。
-- 上传固件并提供 OTA 下载。
-
-常用接口：
-
-```bash
-curl http://localhost:8766/api/status
-curl http://localhost:8766/api/images
-```
-
-上传图片示例：
-
-```bash
-curl -X POST http://localhost:8766/api/upload_image \
-  -F "image=@/path/to/photo.jpg" \
-  -F "format=bwry2bpp" \
-  -F "title=照片标题"
-```
-
-设备进入 AP 传图模式后，手机连接设备热点并访问：
-
-```text
-http://192.168.4.1
+├── firmware/                    ESP32-IDF 固件（单板：zectrix-s3-epaper-4.2）
+│   ├── main/                    应用源码：RawDraw UI、页面渲染、屏幕驱动、AP 传图
+│   ├── components/              组件（屏幕驱动、字体等）
+│   ├── scripts/release.py       打包脚本（merge-bin + zip）
+│   ├── build.sh                 Linux/CI 构建脚本（单板直接构建）
+│   ├── idfbuild.ps1             Windows 本机构建包装
+│   └── tools/layout_adjuster.html  RawDraw 布局微调工具（浏览器打开即用）
+├── tools/
+│   ├── nas-service/             NAS 侧 Flask 服务（Docker 部署，见下）
+│   │   ├── app.py               HTTP 服务：图片转换/推送/遥控/定时/AI 对话
+│   │   ├── board/               看板：天气、新闻、老黄历、股市、AI 对话（纯 PIL 渲染）
+│   │   ├── templates/           手机端页面（index.html / detail.html）
+│   │   ├── Dockerfile           python:3.12 + Noto CJK + gunicorn(gthread)
+│   │   ├── docker-compose.yml   端口 8848→8096，/data 卷持久化
+│   │   └── update-nas.py        代码热同步到 NAS 并重启容器
+│   ├── convert_image.py         命令行图片 → 墨水屏 raw 转换器
+│   └── import_photos.py         NAS 照片目录批量导入设备相册
+└── docs/                        设计文档和实现记录
 ```
 
 ## 固件
 
-固件位于 `firmware/`，基于 ESP-IDF。默认面向 ZecTrix ESP32-S3 4.2 寸墨水屏，支持四色 BWRY 屏，也保留 1bpp 黑白屏配置。
+固件位于 `firmware/`，基于 ESP-IDF，目标板固定为 **zectrix-s3-epaper-4.2**（ZecTrix ESP32-S3 4.2 寸四色 BWRY 屏，400×300），同时保留 1bpp 黑白屏兼容（RawDraw 主题层会把红/黄语义色降级为黑白样式）。
 
-### 编译
+### 构建
+
+Windows 本机（使用本地安装的 ESP-IDF v6.0）：
+
+```powershell
+cd firmware
+.\idfbuild.ps1 build          # 任意 idf.py 子命令都会透传
+```
+
+Linux / CI：
 
 ```bash
 cd firmware
-source ~/Documents/esp/v6.0/esp-idf/export.sh
+./build.sh                    # 完整重编译 + 打包 releases/v*_*.zip
+./build.sh --no-rebuild       # 增量编译
+./build.sh --flash COM5       # 构建后烧录（Windows 串口示例）
+```
+
+已配置好 ESP-IDF 环境时也可以直接：
+
+```bash
+cd firmware
+idf.py set-target esp32s3
 idf.py build
 ```
 
-根目录辅助命令：
+## nas-service 部署（NAS Docker）
+
+服务以单容器跑在 NAS 上（gunicorn gthread，1 worker × 8 线程），容器内监听 **8096**，宿主映射为 **8848**。NAS 作为 HTTP 客户端访问局域网里的墨水屏设备（默认 `DEVICE_IP=192.168.100.75:80`，可在网页「设置」里改）。
 
 ```bash
-npm run firmware:build
+cd tools/nas-service
+docker compose up -d --build
+# 访问 http://<NAS-IP>:8848/
 ```
 
-### 屏幕配置
+### 可选鉴权 NAS_SERVICE_TOKEN
 
-固件 Kconfig 中有屏幕类型选择：
+在 `docker-compose.yml` 的 environment 里设置 `NAS_SERVICE_TOKEN` 后，所有 `/api/*` 请求（含 GET，防止 AI Key 等配置被读取）必须携带 `X-Auth-Token: <同样的值>`，否则返回 401；前端会弹窗让你输入一次并存入 localStorage。不设置则服务照常运行（启动日志会给出无鉴权警告）。公网可达时强烈建议开启。
 
-```text
-ZECTRIX_EPD_PANEL_4COLOR_SSD2683  四色 BWRY 屏
-ZECTRIX_EPD_PANEL_1BPP            黑白 1bpp 屏
-```
+### 设备令牌（固件 LAN 鉴权）
 
-如果要刷回旧黑白屏，先在 `idf.py menuconfig` 中切到 `1bpp black/white EPD`，再重新构建烧录。RawDraw 主题层会把红/黄语义色降级成黑白可读样式。
+固件侧 LAN 模式启用设备 token 鉴权后，设备要求 NAS 的推送/控制请求携带 `X-Device-Token` 头。令牌在设备「设置」页查看，填入 NAS 网页「设置 → 设备连接 → 设备令牌」即可（也可用环境变量 `DEVICE_TOKEN` 固化），NAS 对设备的所有请求会自动带上该头。
 
-## UI 说明
+## 设备 HTTP API 一览
 
-固件 UI 目前走 RawDraw 组件体系，重点页面包括：
+NAS（及调试用的 curl）直接访问设备：
 
-- 对话：显示用户语音、识别状态、AI 回复。
-- 待办：本地展示、服务端同步、完成/删除/编辑。
-- 设置：音量、亮度、主题、网络、同步、OTA 等。
-- 相册：缩略图列表、大图展示、AP 传图入口。
-- 天气/天气详情、新闻、黄历、年度进度、日历、电子书、日志。
-- 快速切换 Overlay：用于页面间快速跳转。
-
-四色屏主题层通过语义样式绘制组件，不建议在业务页面里继续新增裸 `RED/YELLOW/BLACK/WHITE`。新增 UI 时优先使用 RawDraw 组件和 theme token。
-
-## 环境变量
-
-常用后端环境变量：
-
-| 变量 | 默认值 | 说明 |
+| 接口 | 方法 | 说明 |
 | --- | --- | --- |
-| `DASHSCOPE_API_KEY` | 无 | 百炼 API Key，启动后端必需 |
-| `LISTEN_HOST` | `0.0.0.0` | WebSocket 监听地址 |
-| `LISTEN_PORT` | `9001` | WebSocket 端口 |
-| `DISCOVERY_PORT` | `8766` | UDP 发现端口 |
-| `PUSH_IMAGE_PORT` | `8766` | 图片/OTA HTTP API 端口 |
-| `TTS_WS_CHUNK_BYTES` | `8000` | TTS 推送分片大小 |
-| `TTS_WS_CHUNK_GAP_SEC` | `0.01` | TTS 分片发送间隔 |
+| `/status` | GET | 设备状态与可达性探测（NAS「遥控」页用它判断在线） |
+| `/page/list` | GET | 当前页面列表及激活页（遥控按钮数据源） |
+| `/page/show` | POST | 切换设备页面，body `{"page":"weather"}` |
+| `/upload` | POST | 推送图片进相册，query `format=bwry2bpp&title=...`，body 为 raw 字节 |
+| `/screenshot/set` | POST | 推送看板截图到常驻「看板」页，query `format=bwry2bpp&label=...` |
+| `/lifebar/birth` | POST | 配置「人生进度」出生日期，body `{"y":1990,"m":1,"d":1}`，写入 NVS |
 
-不要提交 `.env`、数据库、日志、pid、构建目录和固件产物。
+示例：
+
+```bash
+curl http://192.168.100.75/status
+curl -X POST "http://192.168.100.75/upload?format=bwry2bpp&title=hello" \
+     --data-binary @out.bin
+```
+
+## 命令行工具
+
+```bash
+# 单张图转换（可 --push 直推设备）
+python tools/convert_image.py photo.jpg out.bin --gamut 0.6 --preview preview.png
+
+# NAS 照片目录批量导入设备相册（幂等，已传清单存 tools/uploaded_ids.json）
+export NAS_HOST=... NAS_USER=... NAS_PASS=... NAS_REMOTE_DIR=/share/photos
+python tools/import_photos.py --device 192.168.100.75
+```
 
 ## Git 提交范围
 
-建议提交：
+建议提交：`firmware/`（除 build 产物与 sdkconfig）、`tools/`、`docs/`、根目录 README 与配置。
 
-- `firmware/main/`、`firmware/components/`、`firmware/partitions/` 等固件源码。
-- `server/*.py`、`server/static/`、`server/requirements.txt`、`server/DEPLOY.md`。
-- `frontend/src/`、`frontend/package.json`、`frontend/pnpm-lock.yaml` 等前端源码。
-- 根目录 README、文档、配置模板。
-
-不要提交：
-
-- `firmware/build/`
-- `firmware/managed_components/`
-- `firmware/sdkconfig`
-- `firmware/releases/`
-- `server/.env`
-- `server/todo.db`
-- `server/*.pid`
-- `server/*.log`
-- `frontend/.env*`
-- `frontend/dist/`
-- `node_modules/`
+不要提交：`firmware/build*/`、`firmware/managed_components/`、`firmware/sdkconfig`、`firmware/releases/`、NAS 密码/令牌、`tools/_inbox/`、`tools/uploaded_ids.json` 等本地数据文件。

@@ -123,7 +123,9 @@ bool weather_api_is_ready();
 
 /**
  * @brief Get the last fetched weather data
+ * @return A thread-safe value copy of the last fetched data (empty if no
+ *         fetch has completed yet)
  */
-const WeatherData* weather_api_get_last_data();
+WeatherData weather_api_get_last_data();
 
 #endif  // WEATHER_API_H

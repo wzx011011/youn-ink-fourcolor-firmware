@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -51,10 +52,13 @@ struct AcousticSelftestRoundResult {
     bool has_payload = false;
 };
 
+// Heap-allocated and owned by the playback task: the task may outlive the
+// stack frame of RunRound() (early-return paths), so the context (and the
+// PCM data it references) must not live on the stack.
 struct PlaybackContext {
     AudioCodec* codec = nullptr;
     TaskHandle_t owner_task = nullptr;
-    const std::vector<int16_t>* pcm = nullptr;
+    std::vector<int16_t> pcm;
 };
 
 uint8_t Crc8(const uint8_t* data, size_t length) {
@@ -254,11 +258,15 @@ bool WarmupCodec(AudioCodec* codec) {
 
 void PlaybackTask(void* arg) {
     auto* ctx = static_cast<PlaybackContext*>(arg);
-    if (ctx->codec != nullptr && ctx->pcm != nullptr) {
-        auto pcm_copy = *ctx->pcm;
-        ctx->codec->OutputData(pcm_copy);
+    if (ctx != nullptr) {
+        if (ctx->codec != nullptr && !ctx->pcm.empty()) {
+            ctx->codec->OutputData(ctx->pcm);
+        }
+        xTaskNotifyGive(ctx->owner_task);
     }
-    xTaskNotifyGive(ctx->owner_task);
+    // Free the heap context before deleting this task: vTaskDelete(NULL) does
+    // not return, so anything after it would leak.
+    delete ctx;
     vTaskDelete(NULL);
 }
 
@@ -282,12 +290,19 @@ AcousticSelftestRoundResult RunRound(AudioCodec* codec,
     }
 
     std::vector<int16_t> tx_pcm = GeneratePacketPcm(expected_payload, result.fc);
-    PlaybackContext playback_ctx;
-    playback_ctx.codec = codec;
-    playback_ctx.owner_task = xTaskGetCurrentTaskHandle();
-    playback_ctx.pcm = &tx_pcm;
+    // Heap-allocate the context: the playback task may still be running when
+    // this frame returns via any early-return path below.
+    auto* playback_ctx = new (std::nothrow) PlaybackContext();
+    if (playback_ctx == nullptr) {
+        result.reason = AcousticSelftestFailureReason::kInternalError;
+        return result;
+    }
+    playback_ctx->codec = codec;
+    playback_ctx->owner_task = xTaskGetCurrentTaskHandle();
+    playback_ctx->pcm = std::move(tx_pcm);
     ulTaskNotifyTake(pdTRUE, 0);
-    if (xTaskCreate(PlaybackTask, "ft_audio_tx", 4096, &playback_ctx, 4, nullptr) != pdPASS) {
+    if (xTaskCreate(PlaybackTask, "ft_audio_tx", 4096, playback_ctx, 4, nullptr) != pdPASS) {
+        delete playback_ctx;
         result.reason = AcousticSelftestFailureReason::kInternalError;
         return result;
     }

@@ -96,16 +96,18 @@ static bool load_meta_file(const char* meta_path, PhotoInfo* out_info) {
         return false;
     }
 
+    char json_buf[4096];
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (len <= 0 || len > 4096) {
+    // >= : buffer must still hold the terminating '\0' (len==sizeof would
+    // previously overflow json_buf[4096] by one byte).
+    if (len <= 0 || len >= (long)sizeof(json_buf)) {
         fclose(f);
         ESP_LOGW(kTag, "Invalid meta file size: %s", meta_path);
         return false;
     }
 
-    char json_buf[4096];
     size_t read_len = fread(json_buf, 1, static_cast<size_t>(len), f);
     fclose(f);
     if (read_len != static_cast<size_t>(len)) {
@@ -213,11 +215,42 @@ static bool ensure_photo_dir(void) {
     return true;
 }
 
-// Write index file
+// Remove orphan .bin files that have no matching .meta (e.g. left behind by a
+// previous failed save or power loss). Logged before deletion.
+static void remove_orphan_bins(void) {
+    DIR* dir = opendir(kPhotoDir);
+    if (!dir) {
+        return;
+    }
+    struct dirent* entry = nullptr;
+    while ((entry = readdir(dir)) != nullptr) {
+        const char* name = entry->d_name;
+        size_t name_len = strlen(name);
+        if (name_len < 5 || strcasecmp(name + name_len - 4, ".bin") != 0) {
+            continue;
+        }
+        char meta_path[320];
+        snprintf(meta_path, sizeof(meta_path), "%s/%.*s.meta", kPhotoDir, (int)(name_len - 4), name);
+        struct stat st;
+        if (stat(meta_path, &st) == 0) {
+            continue;  // .meta exists, not an orphan
+        }
+        char bin_path[320];
+        snprintf(bin_path, sizeof(bin_path), "%s/%s", kPhotoDir, name);
+        ESP_LOGW(kTag, "Removing orphan .bin without .meta: %s", name);
+        remove(bin_path);
+    }
+    closedir(dir);
+}
+
+// Write index file atomically: write to a temp file, then rename over the
+// real index. A crash mid-write can no longer corrupt photos.idx.
 static int save_index(void) {
-    FILE *f = fopen(kIndexFile, "wb");
+    static const char* kIndexTmp = "/spiffs/photos.idx.tmp";
+
+    FILE *f = fopen(kIndexTmp, "wb");
     if (!f) {
-        ESP_LOGE(kTag, "Failed to open index for writing");
+        ESP_LOGE(kTag, "Failed to open index temp file for writing");
         return -1;
     }
 
@@ -225,16 +258,34 @@ static int save_index(void) {
     uint32_t magic = INDEX_MAGIC;
     uint16_t version = INDEX_VERSION;
     uint16_t count = (uint16_t)s_photo_count;
-    fwrite(&magic, sizeof(magic), 1, f);
-    fwrite(&version, sizeof(version), 1, f);
-    fwrite(&count, sizeof(count), 1, f);
+    bool ok = fwrite(&magic, sizeof(magic), 1, f) == 1 &&
+              fwrite(&version, sizeof(version), 1, f) == 1 &&
+              fwrite(&count, sizeof(count), 1, f) == 1;
 
     // Write records
-    if (s_photo_count > 0) {
-        fwrite(s_photos, sizeof(PhotoInfo), s_photo_count, f);
+    if (ok && s_photo_count > 0) {
+        ok = fwrite(s_photos, sizeof(PhotoInfo), s_photo_count, f) == (size_t)s_photo_count;
     }
 
-    fclose(f);
+    if (fclose(f) != 0) {
+        ok = false;
+    }
+    if (!ok) {
+        ESP_LOGE(kTag, "Failed to write index temp file");
+        remove(kIndexTmp);
+        return -1;
+    }
+
+    // Atomic replace (SPIFFS supports rename). If rename onto an existing
+    // target is refused, fall back to remove+rename.
+    if (rename(kIndexTmp, kIndexFile) != 0) {
+        remove(kIndexFile);
+        if (rename(kIndexTmp, kIndexFile) != 0) {
+            ESP_LOGE(kTag, "Failed to replace index file");
+            remove(kIndexTmp);
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -332,18 +383,29 @@ int photo_storage_init(void) {
         return 0;
     }
 
-    // Mount SPIFFS
+    // Try mounting WITHOUT formatting first so a genuine mount failure can be
+    // reported loudly before the retry below formats the partition.
     esp_vfs_spiffs_conf_t conf = {
         .base_path = kBasePath,
         .partition_label = kPartitionLabel,
         .max_files = 10,
-        .format_if_mount_failed = true,
+        .format_if_mount_failed = false,
     };
 
     esp_err_t ret = esp_vfs_spiffs_register(&conf);
     if (ret != ESP_OK) {
-        ESP_LOGE(kTag, "Failed to mount SPIFFS: %s", esp_err_to_name(ret));
-        return -1;
+        // The next register() will format the partition, erasing every stored
+        // photo. Make that data loss unmissable in the logs.
+        ESP_LOGE(kTag, "SPIFFS mount failed (%s): formatting partition '%s' now, "
+                 "ALL STORED PHOTOS WILL BE ERASED (corrupt filesystem after power "
+                 "loss or partition change)",
+                 esp_err_to_name(ret), kPartitionLabel);
+        conf.format_if_mount_failed = true;
+        ret = esp_vfs_spiffs_register(&conf);
+        if (ret != ESP_OK) {
+            ESP_LOGE(kTag, "Failed to mount SPIFFS: %s", esp_err_to_name(ret));
+            return -1;
+        }
     }
 
     size_t total = 0, used = 0;
@@ -359,6 +421,9 @@ int photo_storage_init(void) {
 
     // Load index
     load_index();
+
+    // Sweep .bin files left without a .meta (incomplete saves)
+    remove_orphan_bins();
 
     s_initialized = true;
     ESP_LOGI(kTag, "Photo storage initialized (%d photos)", s_photo_count);
@@ -404,6 +469,8 @@ int photo_save(const PhotoInfo *info, const uint8_t *data_1bpp) {
 
     if (written != info->file_size) {
         ESP_LOGE(kTag, "Failed to write full data: %d/%d", written, info->file_size);
+        // Do not leave a truncated half-written .bin behind.
+        remove(bin_path);
         return -1;
     }
 
@@ -422,10 +489,16 @@ int photo_save(const PhotoInfo *info, const uint8_t *data_1bpp) {
         s_photo_count++;
     }
 
-    write_meta_file(entry);
+    if (write_meta_file(entry) != 0) {
+        // The .bin itself is intact; a missing .meta only loses editable
+        // metadata (defaults are applied on load). Surface the failure loudly.
+        ESP_LOGE(kTag, "Failed to write meta file for %s", info->id);
+    }
 
     // Persist index
-    save_index();
+    if (save_index() != 0) {
+        ESP_LOGE(kTag, "Failed to persist photo index");
+    }
 
     ESP_LOGI(kTag, "%s photo %s (%dx%d, %d bytes), total=%d",
              existing_index >= 0 ? "Updated" : "Saved",

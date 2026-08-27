@@ -8,6 +8,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <atomic>
 
 #include "board.h"
 
@@ -45,8 +46,11 @@ protected:
 
     bool duplex_ = false;
     bool input_reference_ = false;
-    bool input_enabled_ = false;
-    bool output_enabled_ = false;
+    // Atomic: read from the audio task loops while Enable*() runs on other
+    // threads, and Es8311AudioCodec::Read()/Write() test them without holding
+    // data_if_mutex_ (use-after-free fix, see es8311_audio_codec.cc).
+    std::atomic<bool> input_enabled_{false};
+    std::atomic<bool> output_enabled_{false};
     int input_sample_rate_ = 0;
     int output_sample_rate_ = 0;
     int input_channels_ = 1;

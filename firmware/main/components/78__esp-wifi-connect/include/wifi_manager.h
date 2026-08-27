@@ -72,6 +72,10 @@ public:
     void StopStation();    // Non-blocking
     void SuspendStationForExternalAp();
     void ResumeStationAfterExternalAp();
+    // True while the user's station link is active (set by StartStation,
+    // cleared by StopStation). Callers use it to decide whether leaving an
+    // external AP should restore STA mode at all.
+    bool IsStationActive() const;
     
     bool IsConnected() const;
     std::string GetSsid() const;

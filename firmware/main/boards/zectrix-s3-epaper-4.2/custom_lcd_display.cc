@@ -17,7 +17,6 @@
 #include "custom_lcd_display.h"
 #include "rawdraw/rawdraw.h"
 #include "rawdraw/framebuffer.h"
-#include "common/sleep_manager.h"
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(SourceHanSansSC_Medium_slim);
@@ -27,7 +26,6 @@ LV_FONT_DECLARE(weather_icons_16);   // Weather icons 16px (FontAwesome)
 LV_FONT_DECLARE(weather_icons_48);   // Weather icons 48px (FontAwesome)
 
 #define TAG "CustomLcdDisplay"
-static constexpr uint32_t kDisplayKickMs = 1000;
 static constexpr int kFourColorSampleIntervalMs = 12000;
 
 #ifndef EXAMPLE_LCD_WIDTH
@@ -41,9 +39,6 @@ static constexpr int kFourColorSampleIntervalMs = 12000;
 #define BYTES_PER_PIXEL (LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565))
 #define BUFF_SIZE (EXAMPLE_LCD_WIDTH * EXAMPLE_LCD_HEIGHT * BYTES_PER_PIXEL)
 #endif
-
-#undef ESP_LOGI
-#define ESP_LOGI(tag, fmt, ...) ((void)0)
 
 // --------------------
 // Rect helpers
@@ -155,17 +150,6 @@ void CustomLcdDisplay::lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, 
         driver->dirty = rect_union(driver->dirty, r);
         driver->pending = true;
         driver->refresh_in_progress = true;
-        driver->UpdateDisplayBusyLocked();
-        uint32_t kick_ms = kDisplayKickMs;
-        if (driver->next_kick_ms_ > 0) {
-            kick_ms = driver->next_kick_ms_;
-            driver->next_kick_ms_ = 0;
-        }
-        sm_kick(kick_ms, "display_flush");
-        //ESP_LOGI(TAG, "[FLUSH] Aligned rect: x=%d, y=%d, w=%d, h=%d", r.x, r.y, r.w, r.h);
-        //ESP_LOGI(TAG, "[FLUSH] Merged dirty: x=%d, y=%d, w=%d, h=%d (area=%d)",
-        //         driver->dirty.x, driver->dirty.y, driver->dirty.w, driver->dirty.h,
-        //         rect_area(driver->dirty));
 
         if (driver->refresh_task) {
             xTaskNotifyGive(driver->refresh_task);
@@ -203,32 +187,52 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_p
     lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
     port_cfg.task_priority   = 2;
     port_cfg.timer_period_ms = 50;
-    lvgl_port_init(&port_cfg);
+    if (lvgl_port_init(&port_cfg) == ESP_OK) {
+        lvgl_port_ready_ = true;
+    }
 
-    lvgl_port_lock(0);
+    if (lvgl_port_ready_) {
+        lvgl_port_lock(0);
+    }
 #endif
 
+    bool alloc_ok = true;
     buffer = (uint8_t *)heap_caps_malloc(lcd_spi_data.buffer_len, MALLOC_CAP_SPIRAM);
-    assert(buffer);
-    memset(buffer, WhiteFillByte(), lcd_spi_data.buffer_len);
+    if (buffer == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate %d byte EPD framebuffer", lcd_spi_data.buffer_len);
+        alloc_ok = false;
+    } else {
+        memset(buffer, WhiteFillByte(), lcd_spi_data.buffer_len);
+    }
 
     prev_buffer = (uint8_t *)heap_caps_malloc(lcd_spi_data.buffer_len, MALLOC_CAP_SPIRAM);
-    assert(prev_buffer);
-    memset(prev_buffer, WhiteFillByte(), lcd_spi_data.buffer_len);
+    if (prev_buffer == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate %d byte EPD prev buffer", lcd_spi_data.buffer_len);
+        alloc_ok = false;
+    } else {
+        memset(prev_buffer, WhiteFillByte(), lcd_spi_data.buffer_len);
+    }
 
     // tx_buf: dirty rect snapshot to avoid tearing during flush
     tx_buf = (uint8_t *)heap_caps_malloc(lcd_spi_data.buffer_len, MALLOC_CAP_SPIRAM);
-    assert(tx_buf);
-    memset(tx_buf, WhiteFillByte(), lcd_spi_data.buffer_len);
+    if (tx_buf == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate %d byte EPD tx buffer", lcd_spi_data.buffer_len);
+        alloc_ok = false;
+    } else {
+        memset(tx_buf, WhiteFillByte(), lcd_spi_data.buffer_len);
+    }
+    buffers_ok_ = alloc_ok;
 
 #ifdef HAVE_LVGL
-    display_ = lv_display_create(width, height);
-    lv_display_set_flush_cb(display_, lvgl_flush_cb);
-    lv_display_set_user_data(display_, this);
+    if (lvgl_port_ready_) {
+        display_ = lv_display_create(width, height);
+        lv_display_set_flush_cb(display_, lvgl_flush_cb);
+        lv_display_set_user_data(display_, this);
 
-    uint8_t *buffer_1 = (uint8_t *)heap_caps_malloc(BUFF_SIZE, MALLOC_CAP_SPIRAM);
-    assert(buffer_1);
-    lv_display_set_buffers(display_, buffer_1, NULL, BUFF_SIZE, LV_DISPLAY_RENDER_MODE_PARTIAL);
+        uint8_t *buffer_1 = (uint8_t *)heap_caps_malloc(BUFF_SIZE, MALLOC_CAP_SPIRAM);
+        assert(buffer_1);
+        lv_display_set_buffers(display_, buffer_1, NULL, BUFF_SIZE, LV_DISPLAY_RENDER_MODE_PARTIAL);
+    }
 #endif
 
     bw_threshold       = 200;
@@ -240,32 +244,39 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_p
         sample_interval_ms = kFourColorSampleIntervalMs;
     }
 
-    ESP_LOGI(TAG, "EPD init");
-    EPD_Init();
+    if (buffers_ok_) {
+        ESP_LOGI(TAG, "EPD init");
+        EPD_Init();
 
-    // buffer init
-    EPD_Clear();
-    memcpy(prev_buffer, buffer, lcd_spi_data.buffer_len);
+        // buffer init
+        EPD_Clear();
+        memcpy(prev_buffer, buffer, lcd_spi_data.buffer_len);
 #if CONFIG_ZECTRIX_EPD_4COLOR_BOOT_TEST_PATTERN
-    if (IsFourColorPanel()) {
-        EPD_DisplayFourColorTestPattern();
-    } else {
-        EPD_Display();
-    }
+        if (IsFourColorPanel()) {
+            EPD_DisplayFourColorTestPattern();
+        } else {
+            EPD_Display();
+        }
 #else
-    EPD_Display();
+        EPD_Display();
 #endif
-    prev_buffer_synced = true;
-    if (IsFourColorPanel()) {
-        last_sample_tick = xTaskGetTickCount();
+        prev_buffer_synced = true;
+        if (IsFourColorPanel()) {
+            last_sample_tick = xTaskGetTickCount();
+        }
+    } else {
+        ESP_LOGE(TAG, "EPD disabled: framebuffer allocation failed");
     }
+
     // start async refresh
     dirty_mutex = xSemaphoreCreateMutex();
     assert(dirty_mutex);
     start_refresh_task();
 
 #ifdef HAVE_LVGL
-    lvgl_port_unlock();
+    if (lvgl_port_ready_) {
+        lvgl_port_unlock();
+    }
 
     if (display_ == nullptr) {
         ESP_LOGE(TAG, "Failed to add display");
@@ -338,19 +349,21 @@ static FrameDiffResult analyze_frame_diff(
 
 void CustomLcdDisplay::start_refresh_task() {
     if (refresh_task) return;
+    refresh_task_stop_.store(false, std::memory_order_relaxed);
     xTaskCreatePinnedToCore(refresh_task_entry, "epd_refresh", 4096, this, 3, &refresh_task, 1);
 }
 
 void CustomLcdDisplay::stop_refresh_task() {
     if (!refresh_task) return;
-    TaskHandle_t t = refresh_task;
-    refresh_task = nullptr;
-    vTaskDelete(t);
-}
-
-void CustomLcdDisplay::UpdateDisplayBusyLocked() {
-    const bool busy = pending || urgent_refresh || force_full_refresh_ || refresh_in_progress;
-    sm_set_busy(SleepBusySrc::Display, busy);
+    // Ask the task to exit and wake it so the stop flag is observed promptly
+    // even while waiting on a long throttle delay. The task clears
+    // refresh_task itself right before vTaskDelete(NULL); after self-deletion
+    // the handle is invalid and must never be passed to vTaskDelete() again.
+    refresh_task_stop_.store(true, std::memory_order_release);
+    xTaskNotifyGive(refresh_task);
+    while (refresh_task != nullptr) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 
 bool CustomLcdDisplay::CheckRefreshIdleLocked() {
@@ -383,14 +396,10 @@ void CustomLcdDisplay::RequestUrgentRefresh() {
     }
     urgent_refresh = true;
     refresh_in_progress = true;
-    const uint32_t default_kick_ms = IsFourColorPanel() ? (uint32_t)sample_interval_ms : kDisplayKickMs;
-    const uint32_t kick_ms = (next_kick_ms_ > 0) ? next_kick_ms_ : default_kick_ms;
     next_kick_ms_ = 0;
-    UpdateDisplayBusyLocked();
     if (dirty_mutex) {
         xSemaphoreGive(dirty_mutex);
     }
-    sm_kick(kick_ms, "display_urgent");
     if (refresh_task) {
         xTaskNotifyGive(refresh_task);
     }
@@ -403,14 +412,10 @@ void CustomLcdDisplay::RequestUrgentFullRefresh() {
     urgent_refresh = true;
     force_full_refresh_ = true;
     refresh_in_progress = true;
-    const uint32_t default_kick_ms = IsFourColorPanel() ? (uint32_t)sample_interval_ms : kDisplayKickMs;
-    const uint32_t kick_ms = (next_kick_ms_ > 0) ? next_kick_ms_ : default_kick_ms;
     next_kick_ms_ = 0;
-    UpdateDisplayBusyLocked();
     if (dirty_mutex) {
         xSemaphoreGive(dirty_mutex);
     }
-    sm_kick(kick_ms, "display_urgent");
     if (refresh_task) {
         xTaskNotifyGive(refresh_task);
     }
@@ -439,9 +444,23 @@ void CustomLcdDisplay::SetNextKickMs(uint32_t kick_ms) {
 void CustomLcdDisplay::refresh_task_entry(void *arg) {
     CustomLcdDisplay *d = (CustomLcdDisplay *)arg;
     d->refresh_task_loop();
+    // Invalidate the shared handle before self-deleting so stop_refresh_task()
+    // can detect our exit without ever touching a freed task handle. After
+    // this point the task must not touch the object any more.
+    d->refresh_task = nullptr;
+    vTaskDelete(NULL);
 }
 
 void CustomLcdDisplay::refresh_task_loop() {
+    if (!buffers_ok_) {
+        // Framebuffers unavailable: park until the task is asked to stop so
+        // no refresh path can dereference the missing buffers.
+        while (!refresh_task_stop_.load(std::memory_order_acquire)) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        return;
+    }
+
     int partial_since_full = 0;
     int tiny_diff_streak = 0;
     size_t tiny_diff_accum_bits = 0;
@@ -487,7 +506,7 @@ void CustomLcdDisplay::refresh_task_loop() {
         }
     };
 
-    while (true) {
+    while (!refresh_task_stop_.load(std::memory_order_acquire)) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
 
         TickType_t now = xTaskGetTickCount();
@@ -515,7 +534,6 @@ void CustomLcdDisplay::refresh_task_loop() {
         if (urgent || rect_area(r) > 0) {
             refresh_in_progress = true;
         }
-        UpdateDisplayBusyLocked();
         (void)CheckRefreshIdleLocked();
         xSemaphoreGive(dirty_mutex);
 
@@ -527,8 +545,9 @@ void CustomLcdDisplay::refresh_task_loop() {
                 stat_skip_throttle++;
                 maybe_log_stats(now);
                 // Avoid spinning when notifications arrive too frequently.
+                // Notify-based wait so a stop request is observed promptly.
                 TickType_t wait_ticks = min_ticks - elapsed;
-                vTaskDelay(wait_ticks > 0 ? wait_ticks : 1);
+                ulTaskNotifyTake(pdTRUE, wait_ticks > 0 ? wait_ticks : 1);
                 continue;
             }
         }
@@ -569,7 +588,6 @@ void CustomLcdDisplay::refresh_task_loop() {
             xSemaphoreTake(dirty_mutex, portMAX_DELAY);
             urgent_refresh = false;
             refresh_in_progress = false;
-            UpdateDisplayBusyLocked();
             fire_idle_cb = CheckRefreshIdleLocked();
             xSemaphoreGive(dirty_mutex);
             if (fire_idle_cb && on_refresh_idle_) {
@@ -638,8 +656,13 @@ void CustomLcdDisplay::refresh_task_loop() {
         if (should_full) {
             stat_full++;
             ESP_LOGI(TAG, "[REFRESH] Performing FULL refresh");
-            EPD_Init();
-            EPD_Display();
+            {
+                // Serialize raw panel access with direct writers such as
+                // DisplayRaw4ColorImage().
+                std::lock_guard<std::mutex> panel_lock(panel_mutex_);
+                EPD_Init();
+                EPD_Display();
+            }
 
             memcpy(prev_buffer, tx_buf, lcd_spi_data.buffer_len);
             prev_buffer_synced = true;
@@ -648,15 +671,17 @@ void CustomLcdDisplay::refresh_task_loop() {
         {
             stat_partial++;
             ESP_LOGI(TAG, "[REFRESH] Performing PARTIAL refresh");
-            EPD_Init();
-            EPD_DisplayPart();
+            {
+                std::lock_guard<std::mutex> panel_lock(panel_mutex_);
+                EPD_Init();
+                EPD_DisplayPart();
+            }
             memcpy(prev_buffer, tx_buf, lcd_spi_data.buffer_len);
             prev_buffer_synced = true;
             partial_since_full++;
         }
         xSemaphoreTake(dirty_mutex, portMAX_DELAY);
         refresh_in_progress = false;
-        UpdateDisplayBusyLocked();
         bool fire_idle_cb = CheckRefreshIdleLocked();
         xSemaphoreGive(dirty_mutex);
         if (fire_idle_cb && on_refresh_idle_) {
@@ -768,7 +793,7 @@ void CustomLcdDisplay::spi_port_rx_init() {
 void CustomLcdDisplay::read_busy() {
     int busy = lcd_spi_data.busy;
     const TickType_t start = xTaskGetTickCount();
-    const TickType_t timeout = pdMS_TO_TICKS(IsFourColorPanel() ? 120000 : 30000);
+    const TickType_t timeout = pdMS_TO_TICKS(IsFourColorPanel() ? 45000 : 30000);
     TickType_t last_log = start;
 
     while (gpio_get_level((gpio_num_t)busy) == 0) {
@@ -778,11 +803,20 @@ void CustomLcdDisplay::read_busy() {
             last_log = now;
         }
         if ((now - start) >= timeout) {
-            ESP_LOGE(TAG, "EPD busy timeout after %u ms, continuing",
-                     (unsigned)((now - start) * portTICK_PERIOD_MS));
+            // Only log the first timeout of a consecutive streak to avoid spam.
+            if (busy_timeout_streak_ == 0) {
+                ESP_LOGE(TAG, "EPD busy timeout after %u ms, continuing",
+                         (unsigned)((now - start) * portTICK_PERIOD_MS));
+            }
+            ++busy_timeout_streak_;
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    if (gpio_get_level((gpio_num_t)busy) != 0) {
+        // Busy released: reset the consecutive-timeout streak.
+        busy_timeout_streak_ = 0;
     }
 }
 
@@ -1071,16 +1105,13 @@ void CustomLcdDisplay::EPD_Display() {
 
         // 一行一发：只做一次 SPI transaction
         writeBytes(line.data(), bytes_per_row_1bpp * 2);
-        if (IsFourColorPanel() && (y % 16) == 15) {
-            vTaskDelay(1);
-        }
     }
 
     EPD_TurnOnDisplay();
 }
 
 bool CustomLcdDisplay::DisplayRaw4ColorImage(const uint8_t* data, size_t len, int width, int height) {
-    if (!IsFourColorPanel() || data == nullptr || width != Width || height != Height) {
+    if (!IsFourColorPanel() || !buffers_ok_ || data == nullptr || width != Width || height != Height) {
         return false;
     }
 
@@ -1099,22 +1130,26 @@ bool CustomLcdDisplay::DisplayRaw4ColorImage(const uint8_t* data, size_t len, in
         force_full_refresh_ = false;
         refresh_in_progress = false;
         dirty = {0, 0, 0, 0};
-        UpdateDisplayBusyLocked();
         xSemaphoreGive(dirty_mutex);
     }
 
-    EPD_Init();
-    EPD_SendCommand(0x10);   // DTM1 Write, raw SSD2683 2bpp stream
-    read_busy();
+    {
+        // Serialize raw panel access with the async refresh task, which holds
+        // the same mutex across its EPD_Init()/EPD_Display() sequences.
+        std::lock_guard<std::mutex> panel_lock(panel_mutex_);
+        EPD_Init();
+        EPD_SendCommand(0x10);   // DTM1 Write, raw SSD2683 2bpp stream
+        read_busy();
 
-    for (int y = 0; y < Height; ++y) {
-        writeBytes(data + y * bytes_per_row, bytes_per_row);
-        if ((y % 16) == 15) {
-            vTaskDelay(1);
+        for (int y = 0; y < Height; ++y) {
+            writeBytes(data + y * bytes_per_row, bytes_per_row);
+            if ((y % 16) == 15) {
+                vTaskDelay(1);
+            }
         }
-    }
 
-    EPD_TurnOnDisplay();
+        EPD_TurnOnDisplay();
+    }
     return true;
 }
 #if 0
@@ -1174,122 +1209,22 @@ void bitInterleave(unsigned char bytes1, unsigned char bytes2) {
 #endif
 
 void CustomLcdDisplay::bitInterleave(unsigned char bytes1, unsigned char bytes2) {
-   
-    unsigned short result=0;
-    
 
-    
+    unsigned short result=0;
+
+
+
     for (int i = 0; i < 8; i++) {
-      
+
         result |= ((bytes1 >> (7 - i)) & 1) << (2 * (7-i)+1);
         result |= ((bytes2 >> (7 - i)) & 1) << (2 * (7-i));
-       
+
         if(i == 3)
           EPD_SendData(result >> 8);
-     
+
         if(i == 7)
           EPD_SendData(result);
     }
-}
-
-
-
-void CustomLcdDisplay::WRITE_WHITE_TO_HLINE()
-{
-  unsigned int i,j,pcnt,pcnt1;
-  
-    EPD_SendCommand(0x10);   // DTM1 Write
-    read_busy();
-                
-  pcnt = 0;
- 
-  for(i=0; i <300; i++)
-  {
-    for(j=0; j<50; j++)
-    {    
-        if(j < 25)
-        bitInterleave(0xFF,0x00);
-        else 
-        bitInterleave(0xFF,0xFF);
-    }        
-  }
-}
-
-void CustomLcdDisplay::WRITE_HLINE_TO_VLINE()
-{
-  unsigned int i,j,pcnt,pcnt1;
-    EPD_SendCommand(0x10);   // DTM1 Write
-    read_busy();
-                
-  pcnt = 0;
- 
-  for(i=0; i <300; i++)
-  {  
-          for(j=0; j<50; j++)
-          {
-             if(i<150 && j < 25)
-             {
-               bitInterleave(0x00,0x00);
-             }
-             else if(i >=150 && j <25 )
-             {
-               bitInterleave(0x00,0xFF);
-             }
-             else if(i <150 && j>= 25)
-             {
-                bitInterleave(0xFF,0x00);
-             }
-             else
-             {
-                bitInterleave(0xFF,0xFF);
-             }
-          }    
-  }
-  
- 
-
-}
-
-
-void CustomLcdDisplay::WRITE_VLINE_TO_HLINE()
-{
-  unsigned int i,j,pcnt,pcnt1;
-
-    EPD_SendCommand(0x10);   // DTM1 Write
-    read_busy();              
-  pcnt = 0;
- 
-  for(i=0; i <300; i++)
-  {
-    
-          for(j=0; j<50; j++)
-          {
-            
-             if(i<150 && j < 25)
-             {
-               bitInterleave(0x00,0x00);
-             }
-             else if(i >= 150 && j < 25 )
-             {
-               bitInterleave(0xFF,0x00);
-             }
-             else if(i < 150 && j>= 25)
-             {
-                bitInterleave(0x00,0xFF);
-             }
-             else
-             {
-                bitInterleave(0xFF,0xFF);
-             }
-             
-          
-          }   
-          
-         
-  }
-  
- 
-
 }
 
 void CustomLcdDisplay::EPD_DisplayPart() {
@@ -1389,8 +1324,6 @@ void CustomLcdDisplay::WriteRaw1bpp(int x, int y, int w, int h, const uint8_t* d
         dirty = rect_union(dirty, r);
         pending = true;
         refresh_in_progress = true;
-        UpdateDisplayBusyLocked();
-        sm_kick(kDisplayKickMs, "display_raw1bpp");
         if (refresh_task) {
             xTaskNotifyGive(refresh_task);
         }
@@ -1424,8 +1357,6 @@ void CustomLcdDisplay::InvertRegion(int x, int y, int w, int h) {
         dirty = rect_union(dirty, r);
         pending = true;
         refresh_in_progress = true;
-        UpdateDisplayBusyLocked();
-        sm_kick(kDisplayKickMs, "display_invert");
         if (refresh_task) {
             xTaskNotifyGive(refresh_task);
         }
@@ -1498,6 +1429,10 @@ void CustomLcdDisplay::render_text_to_buffer(const char* text, int start_x, int 
 }
 
 void CustomLcdDisplay::DrawTexts(const std::vector<TextItem>& texts, bool clear) {
+    if (!buffer || !buffers_ok_) {
+        return;
+    }
+
     xSemaphoreTake(dirty_mutex, portMAX_DELAY);
 
     if (clear) {
@@ -1540,8 +1475,6 @@ void CustomLcdDisplay::DrawTexts(const std::vector<TextItem>& texts, bool clear)
     dirty = rect_union(dirty, r);
     pending = true;
     refresh_in_progress = true;
-    UpdateDisplayBusyLocked();
-    sm_kick(kDisplayKickMs, "display_text");
     if (refresh_task) {
         xTaskNotifyGive(refresh_task);
     }
@@ -1572,7 +1505,6 @@ void CustomLcdDisplay::RawDrawRoundRect(int x, int y, int w, int h, int radius,
         dirty = rect_union(dirty, dr);
         pending = true;
         refresh_in_progress = true;
-        UpdateDisplayBusyLocked();
     }
     xSemaphoreGive(dirty_mutex);
 }
@@ -1593,7 +1525,6 @@ void CustomLcdDisplay::RawDrawHLine(int y, int thickness) {
         dirty = rect_union(dirty, dr);
         pending = true;
         refresh_in_progress = true;
-        UpdateDisplayBusyLocked();
     }
     xSemaphoreGive(dirty_mutex);
 }
@@ -1608,7 +1539,6 @@ void CustomLcdDisplay::RawInvertRegion(int x, int y, int w, int h) {
         dirty = rect_union(dirty, dr);
         pending = true;
         refresh_in_progress = true;
-        UpdateDisplayBusyLocked();
     }
     xSemaphoreGive(dirty_mutex);
 }

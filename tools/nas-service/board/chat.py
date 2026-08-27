@@ -18,6 +18,7 @@ import urllib.request
 from board.pil_renderer import (
     pil_renderer, C_BLACK, C_WHITE, C_RED, C_YELLOW, SCREEN_W, SCREEN_H,
 )
+from board import config_store
 from board.config_store import CONFIG_PATH
 
 # dify 默认经其 nginx 暴露在本机 28080;换端口改这里
@@ -38,11 +39,9 @@ def _load_cfg() -> dict:
 
 
 def _save_cfg(update: dict):
-    cfg = _load_cfg()
-    cfg.update(update)
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    # 经 config_store 统一写入:模块锁 + tmp 原子替换 + 0600 权限。
+    # 之前直接 open("w") 会绕过锁、非原子,还会覆盖掉 schedules 节。
+    config_store.update_extras(update)
 
 
 # ===== 供 app.py 调用的配置接口 =====

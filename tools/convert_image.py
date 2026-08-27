@@ -31,7 +31,10 @@
 """
 
 import argparse
+import os
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from PIL import Image
@@ -146,15 +149,18 @@ def convert_1bpp(
 # ============================================================
 # 推送到设备
 # ============================================================
-def push_to_device(raw: bytes, host: str, fmt: str = "bwry2bpp", title: str = ""):
-    """通过设备的 /upload API 推送 raw 数据。"""
-    import urllib.request
-    import urllib.parse
-
+def push_to_device(raw: bytes, host: str, fmt: str = "bwry2bpp", title: str = "", token: str = ""):
+    """通过设备的 /upload API 推送 raw 数据。token: 设备 LAN 鉴权令牌(设备设置页可见)。"""
     url = f"http://{host}/upload?format={urllib.parse.quote(fmt)}"
-    print(f"推送到 {url} ...")
+    if title:
+        url += "&title=" + urllib.parse.quote(title)  # 标题拼进 URL(相册里可见)
+    if token:
+        url += "&token=" + urllib.parse.quote(token)  # LAN 模式鉴权(AP 模式可省)
+    print(f"推送到 {url.split(chr(63))[0]} ...")
     req = urllib.request.Request(url, data=raw, method="POST")
     req.add_header("Content-Type", "application/octet-stream")
+    if token:
+        req.add_header("X-Device-Token", token)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = resp.read().decode("utf-8", errors="replace")
@@ -206,6 +212,8 @@ def main():
     ap.add_argument("--preview", help="同时输出预览 PNG(方便电脑上对比效果)")
     ap.add_argument("--push", help="转换后自动推送到设备(填 IP,如 192.168.4.1)")
     ap.add_argument("--title", default="", help="推送时的图片标题(配合 --push)")
+    ap.add_argument("--device-token", default=os.environ.get("DEVICE_TOKEN", ""),
+                    help="设备 LAN 鉴权令牌(设备「设置」页可见;AP 模式可省;或环境变量 DEVICE_TOKEN)")
     args = ap.parse_args()
 
     mode = DITHER_MODES[args.dither]
@@ -249,7 +257,7 @@ def main():
 
     # 5. 推送
     if args.push:
-        push_to_device(raw, args.push, fmt, args.title)
+        push_to_device(raw, args.push, fmt, args.title, args.device_token)
 
 
 if __name__ == "__main__":

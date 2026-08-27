@@ -103,10 +103,20 @@ LcdDisplay::~LcdDisplay() {
 }
 
 bool LcdDisplay::Lock(int timeout_ms) {
+    if (!lvgl_port_ready_) {
+        // No LVGL port (e.g. CONFIG_USE_EMOTE_MESSAGE_STYLE=y rawdraw builds).
+        // lvgl_port_lock() would assert; fail softly instead. DisplayLockGuard
+        // handles a false return safely.
+        ESP_LOGE(kTag, "Lock() called without an initialized LVGL port");
+        return false;
+    }
     return lvgl_port_lock(timeout_ms);
 }
 
 void LcdDisplay::Unlock() {
+    if (!lvgl_port_ready_) {
+        return;
+    }
     lvgl_port_unlock();
 }
 

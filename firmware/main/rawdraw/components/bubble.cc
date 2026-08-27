@@ -135,8 +135,9 @@ int Bubble::CalculateHeight() const {
         if (measured_lines > line_count) line_count = measured_lines;
     }
 
-    // Line step must be >= 24px for 1bpp readability
-    int line_step = font_->line_height + line_spacing_;
+    // Line step must be >= 24px for 1bpp readability; without a font the
+    // fallback metrics from the empty-text branch above apply.
+    int line_step = font_ ? font_->line_height + line_spacing_ : 16 + line_spacing_;
     if (line_step < 24) line_step = 24;
 
     int height = (line_count > 0) ? line_step * line_count + 2 * padding_

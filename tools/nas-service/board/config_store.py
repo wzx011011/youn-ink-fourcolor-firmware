@@ -1,7 +1,12 @@
 """Schedule config persistence — JSON file in the data volume.
 
-Stores per-board push schedules (enabled, template, interval, smart mode).
-Survives container restarts (lives in /data which is a mounted volume).
+Stores per-board push schedules (enabled, template, interval, smart mode)
+plus top-level extras (AI provider credentials). Survives container
+restarts (lives in /data which is a mounted volume).
+
+Concurrency: one module lock guards load/save/update_board/update_extras
+so read-modify-write cycles are atomic. Writes go to a tmp file + os.replace
+so readers never see a torn file; the file is chmod 0600 (it may hold AI keys).
 """
 
 import json
@@ -39,6 +44,33 @@ DEFAULT_SCHEDULES = {
 }
 
 
+def _load_doc_locked() -> dict:
+    """Read the whole config doc (caller must hold _lock)."""
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                doc = json.load(f)
+            if isinstance(doc, dict):
+                return doc
+        except Exception as e:
+            logger.warning("config load failed, using defaults: %s", e)
+    return {}
+
+
+def _save_doc_locked(doc: dict):
+    """Atomic write (caller must hold _lock): tmp file + os.replace."""
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CONFIG_PATH.with_name(CONFIG_PATH.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2)
+    try:
+        os.chmod(tmp, 0o600)  # 文件可能含 AI Key,仅属主可读写
+    except OSError:
+        pass  # Windows 开发机上 chmod 语义不完整,忽略
+    os.replace(tmp, CONFIG_PATH)
+    logger.info("schedule config saved to %s", CONFIG_PATH)
+
+
 def load():
     """Load schedules from disk, merging defaults for missing keys.
 
@@ -47,15 +79,7 @@ def load():
     next save(). Defaults only fill in gaps.
     """
     with _lock:
-        if CONFIG_PATH.exists():
-            try:
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                    saved = json.load(f).get("schedules", {})
-            except Exception as e:
-                logger.warning("config load failed, using defaults: %s", e)
-                saved = {}
-        else:
-            saved = {}
+        saved = _load_doc_locked().get("schedules", {})
 
         fallback = {"enabled": False, "template": "",
                     "interval_min": 60, "smart": False}
@@ -73,25 +97,39 @@ def load():
 
 
 def save(schedules):
-    """Persist schedules to disk."""
+    """Persist schedules to disk (preserving top-level extras like AI keys)."""
     with _lock:
-        try:
-            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump({"schedules": schedules}, f, ensure_ascii=False, indent=2)
-            logger.info("schedule config saved to %s", CONFIG_PATH)
-        except Exception as e:
-            logger.error("config save failed: %s", e)
-            raise
+        doc = _load_doc_locked()
+        doc["schedules"] = schedules
+        _save_doc_locked(doc)
 
 
 def update_board(board_id, **kwargs):
-    """Update one board's schedule fields (e.g. enabled=True)."""
-    schedules = load()
-    if board_id not in schedules:
-        schedules[board_id] = dict(DEFAULT_SCHEDULES.get(board_id, {
-            "enabled": False, "template": "", "interval_min": 60, "smart": False
-        }))
-    schedules[board_id].update(kwargs)
-    save(schedules)
-    return schedules[board_id]
+    """Update one board's schedule fields (e.g. enabled=True).
+
+    Lock held across load-modify-save so concurrent updates can't clobber
+    each other.
+    """
+    with _lock:
+        doc = _load_doc_locked()
+        schedules = doc.get("schedules", {})
+        if board_id not in schedules:
+            schedules[board_id] = dict(DEFAULT_SCHEDULES.get(board_id, {
+                "enabled": False, "template": "", "interval_min": 60, "smart": False
+            }))
+        schedules[board_id].update(kwargs)
+        doc["schedules"] = schedules
+        _save_doc_locked(doc)
+        return schedules[board_id]
+
+
+def update_extras(update: dict):
+    """Merge top-level keys (e.g. AI provider credentials) into the config.
+
+    Same lock + atomic write as the schedule API, and unlike schedule
+    writes it keeps unrelated top-level keys intact.
+    """
+    with _lock:
+        doc = _load_doc_locked()
+        doc.update(update)
+        _save_doc_locked(doc)

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <mutex>
 #include <atomic>
+#include <cstdint>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -22,7 +23,7 @@
 #include "audio_processor.h"
 #include "processors/audio_debugger.h"
 #include "wake_word.h"
-#include "protocol.h"
+#include "audio_packet.h"
 
 
 /*
@@ -148,16 +149,20 @@ private:
 
     bool wake_word_initialized_ = false;
     bool audio_processor_initialized_ = false;
-    bool voice_detected_ = false;
-    bool service_stopped_ = true;
+    // Atomic: written by the audio input / opus codec tasks and read from
+    // other threads (UI, application) without taking audio_queue_mutex_.
+    std::atomic<bool> voice_detected_{false};
+    std::atomic<bool> service_stopped_{true};
     bool audio_input_need_warmup_ = false;
     std::atomic<bool> mute_local_sound_{false};
     std::atomic<int64_t> ptt_start_ms_{0};
     std::atomic<bool> ptt_input_logged_{false};
 
     esp_timer_handle_t audio_power_timer_ = nullptr;
-    std::chrono::steady_clock::time_point last_input_time_;
-    std::chrono::steady_clock::time_point last_output_time_;
+    // Monotonic milliseconds (steady_clock since boot). Atomic because they
+    // are written by the audio tasks and read from the esp_timer callback.
+    std::atomic<int64_t> last_input_time_ms_{0};
+    std::atomic<int64_t> last_output_time_ms_{0};
 
     void AudioInputTask();
     void AudioOutputTask();

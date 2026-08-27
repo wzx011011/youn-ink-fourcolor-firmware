@@ -361,12 +361,31 @@ void DrawStyledRoundRect(uint8_t* fb, int width, int height, const Rect& r, int 
         DrawRoundRect(fb, width, height, r, radius, panel_style.bg, panel_style.border, panel_style.border_width);
         return;
     }
-    DrawRoundRect(fb, width, height, r, radius, panel_style.bg, panel_style.border, panel_style.border_width);
+    // Dither fill must respect the rounded outline: filling the square inner
+    // rect used to paint dither pixels over the corner arcs (the corners of
+    // the inner rect lie inside the rounded cut-outs), turning every dithered
+    // card into a noisy square. Clip each dither pixel against the same
+    // rounded-rect geometry the outline uses, minus the border ring.
+    int max_radius = std::min(r.w, r.h) / 2;
+    radius = std::min(radius, max_radius);
+    if (radius < 0) radius = 0;
+    DrawRoundRectBorder(fb, width, height, r, radius,
+                        panel_style.border_width, panel_style.border);
     const Rect inner = {r.x + static_cast<int>(panel_style.border_width),
                         r.y + static_cast<int>(panel_style.border_width),
                         r.w - static_cast<int>(panel_style.border_width) * 2,
                         r.h - static_cast<int>(panel_style.border_width) * 2};
-    DrawStyledRect(fb, width, inner, panel_style);
+    const int inner_radius = std::max(0, radius - static_cast<int>(panel_style.border_width));
+    for (int y = inner.y; y < inner.y + inner.h; ++y) {
+        for (int x = inner.x; x < inner.x + inner.w; ++x) {
+            const int cx = std::clamp(x, inner.x, inner.x + inner.w - 1);
+            const int cy = std::clamp(y, inner.y, inner.y + inner.h - 1);
+            const int dx = x - cx;
+            const int dy = y - cy;
+            if (dx * dx + dy * dy > inner_radius * inner_radius) continue;  // corner cut-out
+            set_pixel(fb, width, x, y, DitherColor(panel_style.dither, panel_style, x, y));
+        }
+    }
 }
 
 void DrawStyledBorder(uint8_t* fb, int width, const Rect& r, const PaintStyle& style) {

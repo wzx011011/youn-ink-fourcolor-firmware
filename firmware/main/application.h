@@ -36,7 +36,9 @@ public:
     void PlaySound(const std::string_view& sound, int duration_ms);
     void MuteSound();
     void StopSound();
-    bool CanEnterSleepMode() const;
+    // True when no subsystem (HTTP server / audio pipeline / EPD refresh)
+    // holds the device out of sleep.
+    bool CanEnterSleepMode();
 
     AudioService& GetAudioService() { return audio_service_; }
     ui::RawDrawUiManager* GetRawDrawUiManager() { return rawdraw_ui_manager_.get(); }
@@ -67,9 +69,11 @@ private:
     void ArmSyncSleepTimer();
     void EnterScheduledSleep();
     void EnterManualSleep();
+    void PrepareForDeepSleep(const char* reason);
     void NoteButtonActivity();
     void EnterWifiConfigMode();
     void StartOnlineDataServices();
+    void StartNfcLandingWriter();
 };
 
 #endif  // _APPLICATION_H_

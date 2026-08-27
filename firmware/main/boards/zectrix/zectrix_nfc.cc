@@ -54,49 +54,6 @@ std::vector<uint8_t> BuildTextNdefMessage(const std::string& text, const std::st
     return message;
 }
 
-std::vector<uint8_t> BuildUriNdefMessage(const std::string& uri) {
-    uint8_t prefix_code = 0x00;
-    std::string uri_suffix = uri;
-    if (uri.rfind("https://www.", 0) == 0) {
-        prefix_code = 0x02;
-        uri_suffix = uri.substr(strlen("https://www."));
-    } else if (uri.rfind("http://www.", 0) == 0) {
-        prefix_code = 0x01;
-        uri_suffix = uri.substr(strlen("http://www."));
-    } else if (uri.rfind("https://", 0) == 0) {
-        prefix_code = 0x04;
-        uri_suffix = uri.substr(strlen("https://"));
-    } else if (uri.rfind("http://", 0) == 0) {
-        prefix_code = 0x03;
-        uri_suffix = uri.substr(strlen("http://"));
-    }
-
-    std::vector<uint8_t> payload;
-    payload.reserve(1 + uri_suffix.size());
-    payload.push_back(prefix_code);
-    payload.insert(payload.end(), uri_suffix.begin(), uri_suffix.end());
-
-    std::vector<uint8_t> message;
-    if (payload.size() <= 0xFF) {
-        message.reserve(4 + payload.size());
-        message.push_back(0xD1);
-        message.push_back(0x01);
-        message.push_back(static_cast<uint8_t>(payload.size()));
-    } else {
-        message.reserve(7 + payload.size());
-        message.push_back(0xC1);
-        message.push_back(0x01);
-        const uint32_t payload_len = static_cast<uint32_t>(payload.size());
-        message.push_back(static_cast<uint8_t>((payload_len >> 24) & 0xFF));
-        message.push_back(static_cast<uint8_t>((payload_len >> 16) & 0xFF));
-        message.push_back(static_cast<uint8_t>((payload_len >> 8) & 0xFF));
-        message.push_back(static_cast<uint8_t>(payload_len & 0xFF));
-    }
-    message.push_back('U');
-    message.insert(message.end(), payload.begin(), payload.end());
-    return message;
-}
-
 std::vector<uint8_t> BuildType2NdefTlv(const std::vector<uint8_t>& message) {
     std::vector<uint8_t> tlv;
     if (message.size() <= 0xFE) {
@@ -126,6 +83,32 @@ ZectrixNfc::ZectrixNfc(i2c_master_bus_handle_t i2c_bus,
       power_gpio_(power_gpio),
       fd_gpio_(fd_gpio),
       fd_active_level_(fd_active_level) {}
+
+ZectrixNfc::~ZectrixNfc() {
+    PowerOff();
+    TeardownFieldMonitoring();
+}
+
+void ZectrixNfc::TeardownFieldMonitoring() {
+    // Remove the ISR handler first so no new notification can reference this
+    // object after it is destroyed.
+    if (fd_gpio_ != GPIO_NUM_NC) {
+        gpio_isr_handler_remove(fd_gpio_);
+    }
+    TaskHandle_t task = field_task_;
+    field_task_ = nullptr;
+    if (task == nullptr) {
+        return;
+    }
+    field_task_done_.store(true, std::memory_order_release);
+    xTaskNotifyGive(task);
+    // FieldTask also polls the done flag (bounded wait), so this cannot hang
+    // forever. The task sets field_task_exited_ immediately before deleting
+    // itself; from there on it touches nothing owned by this object.
+    while (!field_task_exited_.load(std::memory_order_acquire)) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
 
 bool ZectrixNfc::Init() {
     bool expected = false;
@@ -167,6 +150,7 @@ bool ZectrixNfc::Init() {
         xTaskCreate(&ZectrixNfc::FieldTaskEntry, "zectrix_nfc_fd", 3 * 1024, this, 3, &field_task_);
     if (task_ok != pdPASS || field_task_ == nullptr) {
         ESP_LOGE(kTag, "failed to create NFC field task");
+        TeardownFieldMonitoring();
         initialized_.store(false, std::memory_order_release);
         return false;
     }
@@ -174,11 +158,13 @@ bool ZectrixNfc::Init() {
     esp_err_t isr_ret = gpio_isr_handler_add(fd_gpio_, &ZectrixNfc::FieldIsrHandler, this);
     if (isr_ret != ESP_OK) {
         ESP_LOGE(kTag, "failed to install NFC FD ISR: %s", esp_err_to_name(isr_ret));
+        TeardownFieldMonitoring();
         initialized_.store(false, std::memory_order_release);
         return false;
     }
 
     if (!PowerOn()) {
+        TeardownFieldMonitoring();
         initialized_.store(false, std::memory_order_release);
         return false;
     }
@@ -581,6 +567,49 @@ esp_err_t ZectrixNfc::WriteUriNdef(const std::string& uri) {
     return WriteNdef(BuildUriNdefMessage(uri));
 }
 
+std::vector<uint8_t> ZectrixNfc::BuildUriNdefMessage(const std::string& uri) {
+    uint8_t prefix_code = 0x00;
+    std::string uri_suffix = uri;
+    if (uri.rfind("https://www.", 0) == 0) {
+        prefix_code = 0x02;
+        uri_suffix = uri.substr(strlen("https://www."));
+    } else if (uri.rfind("http://www.", 0) == 0) {
+        prefix_code = 0x01;
+        uri_suffix = uri.substr(strlen("http://www."));
+    } else if (uri.rfind("https://", 0) == 0) {
+        prefix_code = 0x04;
+        uri_suffix = uri.substr(strlen("https://"));
+    } else if (uri.rfind("http://", 0) == 0) {
+        prefix_code = 0x03;
+        uri_suffix = uri.substr(strlen("http://"));
+    }
+
+    std::vector<uint8_t> payload;
+    payload.reserve(1 + uri_suffix.size());
+    payload.push_back(prefix_code);
+    payload.insert(payload.end(), uri_suffix.begin(), uri_suffix.end());
+
+    std::vector<uint8_t> message;
+    if (payload.size() <= 0xFF) {
+        message.reserve(4 + payload.size());
+        message.push_back(0xD1);
+        message.push_back(0x01);
+        message.push_back(static_cast<uint8_t>(payload.size()));
+    } else {
+        message.reserve(7 + payload.size());
+        message.push_back(0xC1);
+        message.push_back(0x01);
+        const uint32_t payload_len = static_cast<uint32_t>(payload.size());
+        message.push_back(static_cast<uint8_t>((payload_len >> 24) & 0xFF));
+        message.push_back(static_cast<uint8_t>((payload_len >> 16) & 0xFF));
+        message.push_back(static_cast<uint8_t>((payload_len >> 8) & 0xFF));
+        message.push_back(static_cast<uint8_t>(payload_len & 0xFF));
+    }
+    message.push_back('U');
+    message.insert(message.end(), payload.begin(), payload.end());
+    return message;
+}
+
 void ZectrixNfc::FieldTaskEntry(void* arg) {
     auto* self = static_cast<ZectrixNfc*>(arg);
     if (self == nullptr) {
@@ -757,10 +786,19 @@ void ZectrixNfc::DispatchFieldState(bool field_present) {
 }
 
 void ZectrixNfc::FieldTask() {
-    while (true) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    while (!field_task_done_.load(std::memory_order_acquire)) {
+        // Bounded wait so a shutdown request is honored even without an
+        // incoming field notification.
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
+        if (field_task_done_.load(std::memory_order_acquire)) {
+            break;
+        }
         vTaskDelay(kFieldDebounceDelay);
         const bool field_present = IsPowered() && IsFieldLevelActive();
         UpdateFieldState(field_present, true);
     }
+    // Signal completion before self-deleting; after this line the task must
+    // not touch any member of the owning object.
+    field_task_exited_.store(true, std::memory_order_release);
+    vTaskDelete(nullptr);
 }

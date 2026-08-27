@@ -9,7 +9,9 @@
 #include <lvgl.h>
 #endif
 
+#include <atomic>
 #include <functional>
+#include <mutex>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -133,9 +135,6 @@ private:
 
     // Helper functions for partial display
     void bitInterleave(unsigned char bytes1, unsigned char bytes2);
-    void WRITE_WHITE_TO_HLINE();
-    void WRITE_HLINE_TO_VLINE();
-    void WRITE_VLINE_TO_HLINE();
 
     uint8_t bw_threshold    = 200;
 
@@ -164,7 +163,19 @@ private:
     uint32_t next_kick_ms_ = 0;
     std::function<void()> on_refresh_idle_;
 
-    void UpdateDisplayBusyLocked();
+    // Framebuffer allocation result: refresh paths early-out when the
+    // SPIRAM allocations in the constructor failed.
+    bool buffers_ok_ = false;
+    // Serializes raw SPI/panel access between the async refresh task and
+    // direct panel writes (DisplayRaw4ColorImage). Never held together with
+    // dirty_mutex to keep lock ordering trivial.
+    std::mutex panel_mutex_;
+    // Set to ask the refresh task to exit; the task self-deletes and clears
+    // refresh_task, so the handle is never used after vTaskDelete(NULL).
+    std::atomic<bool> refresh_task_stop_{false};
+    // Consecutive read_busy() timeouts; only the first of a streak is logged.
+    int busy_timeout_streak_ = 0;
+
     bool CheckRefreshIdleLocked();
 
     // 文本渲染辅助

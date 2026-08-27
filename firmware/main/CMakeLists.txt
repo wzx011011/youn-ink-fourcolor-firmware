@@ -16,7 +16,6 @@ set(SOURCES
     "display/lvgl_display/lvgl_display.cc"
     "display/lvgl_display/lvgl_theme.cc"
     "display/lvgl_display/lvgl_font.cc"
-    "common/sleep_manager.cc"
     "boards/common/board.cc"
     "boards/common/button.cc"
     "boards/common/i2c_bus_lock.cc"
@@ -54,14 +53,8 @@ set(SOURCES
     "rawdraw/components/calendar.cc"
     "common/weather_api.cc"
     "common/photo_storage.cc"
-    "common/photo_downloader.cc"
     "common/storage_manager.cc"
-    "common/nvs_state.cc"
-    "common/bluetooth_manager.cc"
-    "common/ble_gatt_service.cc"
-    "common/ble_image_receiver.cc"
     "common/holiday_fetcher.cc"
-    "ui/widgets/status_bar.cc"
     "ui/renderers/rawdraw/ebook_renderer.cc"
     "ui/renderers/rawdraw/chat_renderer.cc"
     "ui/renderers/rawdraw/settings_renderer.cc"
@@ -82,10 +75,6 @@ set(SOURCES
     "ui/renderers/rawdraw/ap_transfer_renderer.cc"
     "ui/renderers/rawdraw/ap_transfer_server.cc"
     "ui/rawdraw_ui_manager.cc"
-    "ui/epd_refresh.cc"
-    "streaming/text_chunker.cc"
-    "streaming/tts_streamer.cc"
-    "streaming/stream_pipeline.cc"
 )
 
 set(INCLUDE_DIRS
@@ -95,13 +84,7 @@ set(INCLUDE_DIRS
     # F5: LVGL include directory kept for header compatibility, source files disabled
     "display/lvgl_display"
     "ui"
-    "ui/pages"
-    "ui/widgets"
-    "ui/renderers"
-    "ui/renderers/common"
     "ui/renderers/rawdraw"
-    "streaming"
-    "protocols"
     "components/78__esp-ml307/include"
     "boards/common"
     "rawdraw"
@@ -119,7 +102,6 @@ idf_component_register(
         efuse
         driver
         esp_wifi
-        bt
         nvs_flash
         78__esp-opus
         78__esp-wifi-connect
@@ -131,7 +113,7 @@ idf_component_register(
         esp_driver_i2s
         esp_http_client
         esp_https_ota
-        json
+        cjson
         esp_timer
         esp_http_server
         mqtt

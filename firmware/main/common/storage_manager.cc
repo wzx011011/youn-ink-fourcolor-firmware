@@ -18,6 +18,21 @@ static const char* kTag = "StorageMgr";
 static const char* kSpiffsBasePath = "/spiffs";
 static const char* kSpiffsPartitionLabel = "assets";
 
+// Reject path-like input so the name can never escape the SPIFFS mount root.
+static bool IsSafeFileName(const std::string& filename) {
+    return !filename.empty() &&
+           filename.find('/') == std::string::npos &&
+           filename.find('\\') == std::string::npos &&
+           filename.find("..") == std::string::npos;
+}
+
+// True if the file name ends with the given suffix (e.g. ".idx").
+static bool NameHasSuffix(const char* name, const char* suffix) {
+    size_t name_len = strlen(name);
+    size_t suffix_len = strlen(suffix);
+    return name_len >= suffix_len && strcmp(name + name_len - suffix_len, suffix) == 0;
+}
+
 StorageInfo GetStorageInfo() {
     StorageInfo info = {};
     info.total_bytes = 0;
@@ -40,7 +55,9 @@ StorageInfo GetStorageInfo() {
     }
     info.total_bytes = static_cast<uint32_t>(total);
     info.used_bytes = static_cast<uint32_t>(used);
-    info.free_bytes = info.total_bytes - info.used_bytes;
+    info.free_bytes = info.total_bytes > info.used_bytes
+                          ? info.total_bytes - info.used_bytes
+                          : 0;
 
     // Enumerate files
     DIR* dir = opendir(kSpiffsBasePath);
@@ -54,8 +71,12 @@ StorageInfo GetStorageInfo() {
         const char* name = entry->d_name;
         if (!name || name[0] == '\0') continue;
 
-        // Skip index/meta files
-        if (strstr(name, ".idx") || strstr(name, ".meta") || strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        // Skip index/meta files by SUFFIX (strstr would also match names that
+        // merely contain ".idx"/".meta" somewhere in the middle)
+        if (NameHasSuffix(name, ".idx") || NameHasSuffix(name, ".meta") ||
+            strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+            continue;
+        }
 
         char path[280];
         snprintf(path, sizeof(path), "%s/%s", kSpiffsBasePath, name);
@@ -82,6 +103,11 @@ StorageInfo GetStorageInfo() {
 }
 
 bool DeleteFile(const std::string& filename) {
+    if (!IsSafeFileName(filename)) {
+        ESP_LOGW(kTag, "Rejected unsafe file name: %s", filename.c_str());
+        return false;
+    }
+
     char path[128];
     snprintf(path, sizeof(path), "%s/%s", kSpiffsBasePath, filename.c_str());
 
@@ -119,6 +145,11 @@ std::vector<std::string> ListTxtFiles() {
 }
 
 std::string ReadTxtFile(const std::string& filename) {
+    if (!IsSafeFileName(filename)) {
+        ESP_LOGW(kTag, "Rejected unsafe file name: %s", filename.c_str());
+        return "";
+    }
+
     char path[128];
     snprintf(path, sizeof(path), "%s/%s", kSpiffsBasePath, filename.c_str());
 

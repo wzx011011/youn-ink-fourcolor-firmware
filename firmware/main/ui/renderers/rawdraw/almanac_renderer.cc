@@ -189,10 +189,20 @@ void AlmanacRenderer::RefreshData() {
     solar_term_ = GetSolarTerm(month_, day_);
 
     // Yiji (宜忌) - simplified based on lunar day
-    int yi_idx = (lunar_.lunar_day - 1) % 10;
-    int ji_idx = (lunar_.lunar_day) % 10;
-    yi_ = kYiTable[yi_idx];
-    ji_ = kJiTable[ji_idx];
+    // ToLunarDate returns {0,0,0} outside its table range (e.g. RTC empty and
+    // SNTP not yet synced -> 1970); (0-1)%10 == -1 would index kYiTable out
+    // of bounds, so degrade to empty entries instead.
+    if (lunar_.lunar_day < 1 || lunar_.lunar_day > 30) {
+        static const char* kEmptyYi[] = {"", ""};
+        static const char* kEmptyJi[] = {"", ""};
+        yi_ = kEmptyYi;
+        ji_ = kEmptyJi;
+    } else {
+        int yi_idx = (lunar_.lunar_day - 1) % 10;
+        int ji_idx = (lunar_.lunar_day) % 10;
+        yi_ = kYiTable[yi_idx];
+        ji_ = kJiTable[ji_idx];
+    }
 }
 
 void AlmanacRenderer::Render(uint8_t* fb, int width, int height) {
@@ -366,6 +376,19 @@ bool AlmanacRenderer::HandleInput(const ButtonEvent& event) {
                     weekday_ = nav.tm_wday;
             }
             lunar_ = Calendar::ToLunarDate(year_, month_, day_);
+            // Recompute every derived field, not just lunar_: the year name
+            // crosses lunar years and the yi/ji tables are keyed by lunar day,
+            // so leaving them stale showed the previously viewed month's data.
+            lunar_year_name_ = Calendar::GetLunarYearName(year_);
+            if (lunar_.lunar_day < 1 || lunar_.lunar_day > 30) {
+                static const char* kEmptyYi[] = {"", ""};
+                static const char* kEmptyJi[] = {"", ""};
+                yi_ = kEmptyYi;
+                ji_ = kEmptyJi;
+            } else {
+                yi_ = kYiTable[(lunar_.lunar_day - 1) % 10];
+                ji_ = kJiTable[(lunar_.lunar_day) % 10];
+            }
             solar_term_ = GetSolarTerm(month_, day_);
             needs_full_refresh_ = true;
             return true;

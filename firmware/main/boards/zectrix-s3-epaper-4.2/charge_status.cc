@@ -16,15 +16,34 @@ void ChargeStatus::Init(gpio_num_t detect_gpio, gpio_num_t full_gpio, int64_t no
     cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
     ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_config(&cfg));
 
-    UpdateSnapshot(State::kNoPower, false, false, false);
-    Tick(now_ms);
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    UpdateSnapshotLocked(State::kNoPower, false, false, false);
+    std::function<void(const Snapshot&)> cb;
+    TickLocked(now_ms, cb);
+    initialized_.store(true, std::memory_order_release);
 }
 
 void ChargeStatus::OnStateChanged(std::function<void(const Snapshot&)> cb) {
-    on_state_changed_ = cb;
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    on_state_changed_ = std::move(cb);
 }
 
 void ChargeStatus::Tick(int64_t now_ms) {
+    // Guard against Tick() racing Init(): until the GPIOs are configured the
+    // reads are meaningless (e.g. PowerLedTask started before Init).
+    if (!initialized_.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::function<void(const Snapshot&)> cb;
+    const bool changed = TickLocked(now_ms, cb);
+    if (changed && cb) {
+        cb(Get());
+    }
+}
+
+bool ChargeStatus::TickLocked(int64_t now_ms, std::function<void(const Snapshot&)>& cb) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+
     const bool detect_high = gpio_get_level(detect_gpio_) == CHARGE_DETECT_CHARGING_LEVEL;
     const bool full_high = gpio_get_level(full_gpio_) == 1;
 
@@ -74,16 +93,17 @@ void ChargeStatus::Tick(int64_t now_ms) {
         state = State::kCharging;
     }
 
-    UpdateSnapshot(state, power_present, state == State::kFull, no_battery);
+    const bool charging = (state == State::kCharging || state == State::kNoBattery);
+    const uint32_t packed = Pack(state, power_present, charging, state == State::kFull, no_battery);
+    const uint32_t old = snapshot_.exchange(packed, std::memory_order_relaxed);
+    cb = on_state_changed_;
+    return old != packed;
 }
 
-void ChargeStatus::UpdateSnapshot(State state, bool power_present, bool full, bool no_battery) {
+void ChargeStatus::UpdateSnapshotLocked(State state, bool power_present, bool full, bool no_battery) {
     const bool charging = (state == State::kCharging || state == State::kNoBattery);
     const uint32_t packed = Pack(state, power_present, charging, full, no_battery);
-    const uint32_t old = snapshot_.exchange(packed, std::memory_order_relaxed);
-    if (old != packed && on_state_changed_) {
-        on_state_changed_(Unpack(packed));
-    }
+    snapshot_.store(packed, std::memory_order_relaxed);
 }
 
 uint32_t ChargeStatus::Pack(State state, bool power_present, bool charging, bool full, bool no_battery) {

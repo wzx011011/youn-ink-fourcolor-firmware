@@ -1,4 +1,0 @@
-dependencies:
-  espressif/cjson:
-    version: "*"
-    require: public

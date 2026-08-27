@@ -1,5 +1,7 @@
-import sys
 import os
+import re
+import shlex
+import sys
 import json
 import zipfile
 import argparse
@@ -9,9 +11,22 @@ from typing import Optional
 # Switch to project root directory
 os.chdir(Path(__file__).resolve().parent.parent)
 
+# 命令行/脚本拼接进 os.system 的参数全部走白名单校验,防止注入
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9._\-]+$")
+_SAFE_BOARD = re.compile(r"^[a-z0-9.\-]+$")
+_SAFE_TARGET = re.compile(r"^[a-z0-9]+$")
+_SAFE_URL = re.compile(r"^[A-Za-z0-9+.\-:/_%?#=&]+$")
+
 ################################################################################
 # Common utility functions
 ################################################################################
+
+def _validate(label: str, value: str, pattern) -> str:
+    if not pattern.fullmatch(value):
+        print(f"[ERROR] 参数 {label} 含非法字符: {value!r}", file=sys.stderr)
+        sys.exit(1)
+    return value
+
 
 def get_board_type_from_compile_commands() -> Optional[str]:
     """Parse the current compiled BOARD_TYPE from build/compile_commands.json"""
@@ -58,19 +73,38 @@ def zip_bin(name: str, version: str) -> None:
     print(f"zip bin to {output_path} done")
 
 ################################################################################
-# board / variant related functions
+# board related functions — single-board project
 ################################################################################
 
 _BOARDS_DIR = Path("main/boards")
 
+# main/CMakeLists.txt 现在是单板硬编码:
+#   target_compile_definitions(... BOARD_TYPE=\"zectrix-s3-epaper-4.2\" ...)
+_CMAKE_BOARD_RE = re.compile(r'BOARD_TYPE=\\"([A-Za-z0-9._\-]+)\\"')
+
+
+def _parse_board_type_from_cmake() -> Optional[str]:
+    """Parse the hardcoded BOARD_TYPE from main/CMakeLists.txt."""
+    cmake_file = Path("main/CMakeLists.txt")
+    if not cmake_file.exists():
+        return None
+    m = _CMAKE_BOARD_RE.search(cmake_file.read_text(encoding="utf-8"))
+    return m.group(1) if m else None
+
+
+def _board_type_exists(board_type: str) -> bool:
+    """Single-board repo: the type must match main/CMakeLists.txt exactly."""
+    return board_type == _parse_board_type_from_cmake()
+
 
 def _collect_variants(config_filename: str = "config.json") -> list[dict[str, str]]:
-    """Traverse all boards under main/boards, collect variant information.
+    """Collect board/variant information under main/boards.
 
-    Return example:
-        [{"board": "bread-compact-ml307", "name": "bread-compact-ml307"}, ...]
+    Boards without a config.json are synthesized as a single variant
+    (name == board dir name) when they match the hardcoded BOARD_TYPE.
     """
     variants: list[dict[str, str]] = []
+    hardcoded = _parse_board_type_from_cmake()
     for board_path in _BOARDS_DIR.iterdir():
         if not board_path.is_dir():
             continue
@@ -78,7 +112,8 @@ def _collect_variants(config_filename: str = "config.json") -> list[dict[str, st
             continue
         cfg_path = board_path / config_filename
         if not cfg_path.exists():
-            print(f"[WARN] {cfg_path} does not exist, skip", file=sys.stderr)
+            if hardcoded and board_path.name == hardcoded:
+                variants.append({"board": board_path.name, "name": board_path.name})
             continue
         try:
             with cfg_path.open() as f:
@@ -88,30 +123,6 @@ def _collect_variants(config_filename: str = "config.json") -> list[dict[str, st
         except Exception as e:
             print(f"[ERROR] 解析 {cfg_path} 失败: {e}", file=sys.stderr)
     return variants
-
-
-def _parse_board_config_map() -> dict[str, str]:
-    """Build the mapping of CONFIG_BOARD_TYPE_xxx and board_type from main/CMakeLists.txt"""
-    cmake_file = Path("main/CMakeLists.txt")
-    mapping: dict[str, str] = {}
-    lines = cmake_file.read_text(encoding="utf-8").splitlines()
-    for idx, line in enumerate(lines):
-        if "if(CONFIG_BOARD_TYPE_" in line:
-            config_name = line.strip().split("if(")[1].split(")")[0]
-            if idx + 1 < len(lines):
-                next_line = lines[idx + 1].strip()
-                if next_line.startswith("set(BOARD_TYPE"):
-                    board_type = next_line.split('"')[1]
-                    mapping[config_name] = board_type
-    return mapping
-
-
-def _find_board_config(board_type: str) -> Optional[str]:
-    """Find the corresponding CONFIG_BOARD_TYPE_xxx for the given board_type"""
-    for config, b_type in _parse_board_config_map().items():
-        if b_type == board_type:
-            return config
-    return None
 
 
 # Kconfig "select" entries are not automatically applied when we simply append
@@ -155,60 +166,83 @@ def _apply_auto_selects(sdkconfig_append: list[str]) -> list[str]:
 
     return items
 
-################################################################################
-# Check board_type in CMakeLists
-################################################################################
 
-def _board_type_exists(board_type: str) -> bool:
-    cmake_file = Path("main/CMakeLists.txt")
-    pattern = f'set(BOARD_TYPE "{board_type}")'
-    return pattern in cmake_file.read_text(encoding="utf-8")
+_APPEND_MARKER = "# Append by release.py"
+
+
+def _append_sdkconfig(entries: list[str]) -> None:
+    """Append entries to sdkconfig — idempotent.
+
+    先移除上一次追加的整块再写新块(按键去重),反复运行不会堆积重复行;
+    块外的 sdkconfig(用户手改/defaults 生成的)保持原样,追加块靠
+    "后写覆盖" 语义生效。
+    """
+    path = Path("sdkconfig")
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    if _APPEND_MARKER in existing:
+        existing = existing.split(_APPEND_MARKER, 1)[0].rstrip("\n")
+
+    dedup: dict[str, str] = {}
+    for entry in entries:
+        dedup[entry.split("=", 1)[0]] = entry
+
+    block = _APPEND_MARKER + "\n" + "\n".join(dedup.values()) + "\n"
+    text = (existing + "\n\n" + block) if existing.strip() else block
+    path.write_text(text, encoding="utf-8")
 
 ################################################################################
 # Compile implementation
 ################################################################################
 
-def release(board_type: str, config_filename: str = "config.json", *, filter_name: Optional[str] = None) -> None:
-    """Compile and package all/specified variants of the specified board_type
+def release(board_type: str, config_filename: str = "config.json", *,
+            filter_name: Optional[str] = None, target: Optional[str] = None,
+            ota_url: Optional[str] = None, wifi_ssid: Optional[str] = None,
+            wifi_password: Optional[str] = None) -> None:
+    """Compile and package the given board_type (single-board project).
 
-    Args:
-        board_type: directory name under main/boards
-        config_filename: config.json name (default: config.json)
-        filter_name: if specified, only compile the build["name"] that matches
+    config.json is optional: when absent the board is built as one variant
+    named after the board itself with the given target (default esp32s3).
     """
     cfg_path = _BOARDS_DIR / board_type / config_filename
-    if not cfg_path.exists():
-        print(f"[WARN] {cfg_path} 不存在，跳过 {board_type}")
-        return
+    if cfg_path.exists():
+        with cfg_path.open() as f:
+            cfg = json.load(f)
+        target = target or cfg["target"]
+        builds = cfg.get("builds", [])
+    else:
+        print(f"[INFO] {cfg_path} 不存在,按单板默认变体构建 (name={board_type})")
+        target = target or "esp32s3"
+        builds = [{"name": board_type, "sdkconfig_append": []}]
+    _validate("target", target, _SAFE_TARGET)
 
     project_version = get_project_version()
     print(f"Project Version: {project_version} ({cfg_path})")
 
-    with cfg_path.open() as f:
-        cfg = json.load(f)
-    target = cfg["target"]
-
-    builds = cfg.get("builds", [])
     if filter_name:
         builds = [b for b in builds if b["name"] == filter_name]
         if not builds:
-            print(f"[ERROR] 未在 {board_type} 的 {config_filename} 中找到变体 {filter_name}", file=sys.stderr)
+            print(f"[ERROR] 未在 {board_type} 中找到变体 {filter_name}", file=sys.stderr)
             sys.exit(1)
 
     for build in builds:
         name = build["name"]
         if not name.startswith(board_type):
             raise ValueError(f"build.name {name} 必须以 {board_type} 开头")
+        _validate("build name", name, _SAFE_NAME)
 
         output_path = Path("releases") / f"v{project_version}_{name}.zip"
         if output_path.exists():
             print(f"跳过 {name} 因为 {output_path} 已存在")
             continue
 
-        # Process sdkconfig_append
-        board_type_config = _find_board_config(board_type)
-        sdkconfig_append = [f"{board_type_config}=y"]
-        sdkconfig_append.extend(build.get("sdkconfig_append", []))
+        # 单板项目不再有 CONFIG_BOARD_TYPE_x 开关,直接用 CLI 注入项
+        sdkconfig_append = list(build.get("sdkconfig_append", []))
+        if ota_url:
+            _validate("ota-url", ota_url, _SAFE_URL)
+            sdkconfig_append.append(f'CONFIG_OTA_URL="{ota_url}"')
+        if wifi_ssid:
+            sdkconfig_append.append(f'CONFIG_DEFAULT_WIFI_SSID="{wifi_ssid}"')
+            sdkconfig_append.append(f'CONFIG_DEFAULT_WIFI_PASSWORD="{wifi_password or ""}"')
         sdkconfig_append = _apply_auto_selects(sdkconfig_append)
 
         print("-" * 80)
@@ -220,18 +254,17 @@ def release(board_type: str, config_filename: str = "config.json", *, filter_nam
         os.environ.pop("IDF_TARGET", None)
 
         # Call set-target
-        if os.system(f"idf.py set-target {target}") != 0:
+        if os.system(f"idf.py set-target {shlex.quote(target)}") != 0:
             print("set-target failed", file=sys.stderr)
             sys.exit(1)
 
-        # Append sdkconfig
-        with Path("sdkconfig").open("a") as f:
-            f.write("\n")
-            f.write("# Append by release.py\n")
-            for append in sdkconfig_append:
-                f.write(f"{append}\n")
+        # Append sdkconfig (先去重再写,幂等)
+        _append_sdkconfig(sdkconfig_append)
+
         # Build with macro BOARD_NAME defined to name
-        if os.system(f"idf.py -DBOARD_NAME={name} -DBOARD_TYPE={board_type} build") != 0:
+        cmd = (f"idf.py -DBOARD_NAME={shlex.quote(name)} "
+               f"-DBOARD_TYPE={shlex.quote(board_type)} build")
+        if os.system(cmd) != 0:
             print("build failed")
             sys.exit(1)
 
@@ -247,11 +280,17 @@ def release(board_type: str, config_filename: str = "config.json", *, filter_nam
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("board", nargs="?", default=None, help="板子类型或 all")
-    parser.add_argument("-c", "--config", default="config.json", help="指定 config 文件名，默认 config.json")
+    parser.add_argument("board", nargs="?", default=None,
+                        help="板子类型(须与 main/CMakeLists.txt 的 BOARD_TYPE 一致)或 all")
+    parser.add_argument("-c", "--config", default="config.json",
+                        help="指定 config 文件名，默认 config.json(单板项目可无)")
     parser.add_argument("--list-boards", action="store_true", help="列出所有支持的 board 及变体列表")
     parser.add_argument("--json", action="store_true", help="配合 --list-boards，JSON 格式输出")
     parser.add_argument("--name", help="指定变体名称，仅编译匹配的变体")
+    parser.add_argument("--target", default="esp32s3", help="芯片目标(config.json 缺省时使用,默认 esp32s3)")
+    parser.add_argument("--ota-url", default=None, help="注入 CONFIG_OTA_URL")
+    parser.add_argument("--wifi-ssid", default=None, help="注入 CONFIG_DEFAULT_WIFI_SSID")
+    parser.add_argument("--wifi-password", default=None, help="注入 CONFIG_DEFAULT_WIFI_PASSWORD")
 
     args = parser.parse_args()
 
@@ -280,26 +319,21 @@ if __name__ == "__main__":
     board_type_input: str = args.board
     name_filter: str | None = args.name
 
-    # Check board_type in CMakeLists
-    if board_type_input != "all" and not _board_type_exists(board_type_input):
-        print(f"[ERROR] main/CMakeLists.txt 中未找到 board_type {board_type_input}", file=sys.stderr)
+    if board_type_input == "all":
+        # 单板仓库:all 等价于 CMakeLists 里那个板
+        parsed = _parse_board_type_from_cmake()
+        if not parsed:
+            print("[ERROR] 未能从 main/CMakeLists.txt 解析 BOARD_TYPE", file=sys.stderr)
+            sys.exit(1)
+        board_type_input = parsed
+
+    # Check board_type in CMakeLists (target_compile_definitions 硬编码单板)
+    if not _board_type_exists(board_type_input):
+        print(f"[ERROR] main/CMakeLists.txt 中未找到 board_type {board_type_input}",
+              file=sys.stderr)
         sys.exit(1)
 
-    variants_all = _collect_variants(config_filename=args.config)
-
-    # Filter board_type list
-    target_board_types: set[str]
-    if board_type_input == "all":
-        target_board_types = {v["board"] for v in variants_all}
-    else:
-        target_board_types = {board_type_input}
-
-    for bt in sorted(target_board_types):
-        if not _board_type_exists(bt):
-            print(f"[ERROR] main/CMakeLists.txt 中未找到 board_type {bt}", file=sys.stderr)
-            sys.exit(1)
-        cfg_path = _BOARDS_DIR / bt / args.config
-        if bt == board_type_input and not cfg_path.exists():
-            print(f"开发板 {bt} 未定义 {args.config} 配置文件，跳过")
-            sys.exit(0)
-        release(bt, config_filename=args.config, filter_name=name_filter if bt == board_type_input else None)
+    release(board_type_input, config_filename=args.config,
+            filter_name=name_filter, target=args.target,
+            ota_url=args.ota_url, wifi_ssid=args.wifi_ssid,
+            wifi_password=args.wifi_password)

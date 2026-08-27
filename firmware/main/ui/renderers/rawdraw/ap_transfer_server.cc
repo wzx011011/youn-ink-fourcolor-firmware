@@ -5,6 +5,8 @@
 
 #include "ap_transfer_server.h"
 #include "boards/zectrix-s3-epaper-4.2/config.h"
+#include "boards/zectrix-s3-epaper-4.2/custom_lcd_display.h"
+#include "board.h"
 #include "common/photo_storage.h"
 #include "settings.h"
 #include "wifi_manager.h"
@@ -14,6 +16,7 @@
 #include <esp_event.h>
 #include <esp_netif.h>
 #include <esp_mac.h>
+#include <esp_random.h>
 #include <esp_timer.h>
 #include <esp_err.h>
 #include <esp_sleep.h>
@@ -39,6 +42,8 @@ constexpr const char* kApPassword = "12345678";
 constexpr const char* kApIp = "192.168.4.1";
 constexpr const char* kGalleryNamespace = "gallery";
 constexpr const char* kSlideshowIntervalKey = "slide_min";
+constexpr const char* kAuthNamespace = "auth";
+constexpr const char* kAuthTokenKey = "http_token";
 
 // Screen dimensions
 constexpr int kScreenWidth = 400;
@@ -62,7 +67,7 @@ const char kUploadHtml[] = R"HTML(
 </main>
 <div class="modal" id="modal"><div class="dialog"><button class="close" id="close">×</button><canvas class="big" id="big" width="400" height="300"></canvas><div class="meta"><input id="mTitle" style="width:100%;padding:7px;border:1px solid #111;font-weight:800"><div class="row" style="margin-top:6px"><input id="mDate" placeholder="日期" style="flex:1;padding:7px;border:1px solid #111"><input id="mLocation" placeholder="地点" style="flex:1;padding:7px;border:1px solid #111"></div><textarea id="mBody" rows="3" style="width:100%;margin-top:6px;padding:7px;border:1px solid #111"></textarea><div class="muted" id="mMeta" style="margin-top:5px"></div><div class="row" style="margin-top:8px"><button class="btn yellow" id="mSave">保存信息</button><button class="btn secondary" id="mUp">上移</button><button class="btn secondary" id="mDown">下移</button><button class="btn danger" id="mDelete">删除这张</button></div></div></div></div>
 <script>
-const W=400,H=300,photosEl=document.getElementById('photos'),statusEl=document.getElementById('status'),pv=document.getElementById('preview'),fileEl=document.getElementById('file'),sendBtn=document.getElementById('send'),batchBtn=document.getElementById('batch'),countEl=document.getElementById('count'),settingsPanel=document.getElementById('settingsPanel'),settingsState=document.getElementById('settingsState'),endpointEl=document.getElementById('endpoint');let pending=null,pendingFmt='1bpp',items=[],selected=new Set(),active=null;
+const W=400,H=300,photosEl=document.getElementById('photos'),statusEl=document.getElementById('status'),pv=document.getElementById('preview'),fileEl=document.getElementById('file'),sendBtn=document.getElementById('send'),batchBtn=document.getElementById('batch'),countEl=document.getElementById('count'),settingsPanel=document.getElementById('settingsPanel'),settingsState=document.getElementById('settingsState'),endpointEl=document.getElementById('endpoint');let pending=null,pendingFmt='1bpp',items=[],selected=new Set(),active=null;const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function loadStatus(){try{const j=await (await fetch('/status')).json();endpointEl.textContent=`${j.mode==='lan'?'LAN':'InkScreen-AP'} / ${j.ip}`;document.title=`墨水屏传图 ${j.ip}`}catch(e){endpointEl.textContent='服务地址读取失败'}}
 function fmt(){return document.querySelector('input[name=fmt]:checked').value}
 function rgba(c){return c===0?[0,0,0]:c===1?[255,255,255]:c===2?[255,217,0]:[220,0,0]}
@@ -74,7 +79,7 @@ document.getElementById('pick').onclick=()=>fileEl.click();fileEl.onchange=async
 sendBtn.onclick=async()=>{if(!pending)return;sendBtn.disabled=true;statusEl.textContent='上传中...';try{const r=await fetch('/upload?format='+encodeURIComponent(pendingFmt),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:pending});const j=await r.json();statusEl.textContent=j.success?'已发送并保存':'失败: '+(j.error||'unknown');await loadPhotos()}catch(e){statusEl.textContent='网络错误'}sendBtn.disabled=false};
 async function loadBin(p,c){const b=new Uint8Array(await (await fetch('/photo?id='+encodeURIComponent(p.id),{cache:'no-store'})).arrayBuffer());(p.format==='bwry2bpp'||p.size>15000?draw2:draw1)(b,c)}
 function updateBatch(){batchBtn.disabled=selected.size===0}
-async function loadPhotos(){selected.clear();updateBatch();try{const j=await (await fetch('/photos',{cache:'no-store'})).json();items=j.photos||[];countEl.textContent=`${items.length} 张`;photosEl.innerHTML=items.length?'':'<div class="empty">暂无图片</div>';const thumbs=[];for(const p of items){const card=document.createElement('div');card.className='card';card.innerHTML=`<input class="check" type="checkbox"><span class="tag">${p.format==='bwry2bpp'?'2BP':'1BP'}</span><canvas class="thumb" width="400" height="300"></canvas><div class="meta"><div class="title">${p.title||p.id}</div><div class="body">${p.body||''}</div><div class="muted">${p.date||''} ${p.location||''}</div><div class="row" style="margin-top:5px"><button class="btn yellow show">展示</button><button class="btn secondary up">上移</button><button class="btn secondary down">下移</button></div></div>`;const c=card.querySelector('canvas'),ck=card.querySelector('input');ck.onclick=e=>{e.stopPropagation();ck.checked?selected.add(p.id):selected.delete(p.id);updateBatch()};card.querySelector('.show').onclick=e=>{e.stopPropagation();showPhoto(p.id)};card.querySelector('.up').onclick=e=>{e.stopPropagation();movePhoto(p.id,-1)};card.querySelector('.down').onclick=e=>{e.stopPropagation();movePhoto(p.id,1)};card.onclick=()=>openModal(p);photosEl.appendChild(card);thumbs.push([p,c])}for(const [p,c] of thumbs){await loadBin(p,c).catch(()=>{})}}catch(e){photosEl.innerHTML='<div class="empty">读取失败</div>'}}
+async function loadPhotos(){selected.clear();updateBatch();try{const j=await (await fetch('/photos',{cache:'no-store'})).json();items=j.photos||[];countEl.textContent=`${items.length} 张`;photosEl.innerHTML=items.length?'':'<div class="empty">暂无图片</div>';const thumbs=[];for(const p of items){const card=document.createElement('div');card.className='card';card.innerHTML=`<input class="check" type="checkbox"><span class="tag">${p.format==='bwry2bpp'?'2BP':'1BP'}</span><canvas class="thumb" width="400" height="300"></canvas><div class="meta"><div class="title">${esc(p.title||p.id)}</div><div class="body">${esc(p.body||'')}</div><div class="muted">${esc(p.date||'')} ${esc(p.location||'')}</div><div class="row" style="margin-top:5px"><button class="btn yellow show">展示</button><button class="btn secondary up">上移</button><button class="btn secondary down">下移</button></div></div>`;const c=card.querySelector('canvas'),ck=card.querySelector('input');ck.onclick=e=>{e.stopPropagation();ck.checked?selected.add(p.id):selected.delete(p.id);updateBatch()};card.querySelector('.show').onclick=e=>{e.stopPropagation();showPhoto(p.id)};card.querySelector('.up').onclick=e=>{e.stopPropagation();movePhoto(p.id,-1)};card.querySelector('.down').onclick=e=>{e.stopPropagation();movePhoto(p.id,1)};card.onclick=()=>openModal(p);photosEl.appendChild(card);thumbs.push([p,c])}for(const [p,c] of thumbs){await loadBin(p,c).catch(()=>{})}}catch(e){photosEl.innerHTML='<div class="empty">读取失败</div>'}}
 function openModal(p){active=p;document.getElementById('modal').classList.add('open');document.getElementById('mTitle').value=p.title||'';document.getElementById('mDate').value=p.date||'';document.getElementById('mLocation').value=p.location||'';document.getElementById('mMeta').textContent=`${p.format==='bwry2bpp'?'2 BP 四色':'1 BP 黑白'} · ${p.width}x${p.height}`;document.getElementById('mBody').value=p.body||'';loadBin(p,document.getElementById('big')).catch(()=>{})}
 document.getElementById('close').onclick=()=>document.getElementById('modal').classList.remove('open');document.getElementById('modal').onclick=e=>{if(e.target.id==='modal')document.getElementById('modal').classList.remove('open')};
 async function delOne(id){return fetch('/photo?id='+encodeURIComponent(id),{method:'DELETE'}).then(r=>r.json())}
@@ -162,6 +167,18 @@ void DeferredControlTask(void* arg) {
     }
     if (request->enter_sleep) {
         ESP_LOGI(kTag, "Entering deep sleep after web control request");
+        // Mirror the application's deep-sleep preparation: wait out an EPD
+        // refresh and cut the peripheral rails so the panel is not left with
+        // a DC bias while sleeping.
+        if (auto* lcd = dynamic_cast<CustomLcdDisplay*>(Board::GetInstance().GetDisplay())) {
+            int waited_ms = 0;
+            while (lcd->IsRefreshPending() && waited_ms < 30000) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                waited_ms += 100;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+        Board::GetInstance().PrepareForDeepSleep();
         esp_sleep_enable_ext0_wakeup(static_cast<gpio_num_t>(BOOT_BUTTON_GPIO), 0);
         esp_deep_sleep_start();
     }
@@ -348,16 +365,17 @@ void ApTransferServer::Stop() {
 
     if (old_mode == TransferMode::kAp) {
         ESP_LOGI(kTag, "Returning WiFi to STA mode");
-        esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
-        if (err != ESP_OK) {
-            ESP_LOGW(kTag, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));
+        WifiManager& wifi = WifiManager::GetInstance();
+        // Only restore STA when the user's station was active before the
+        // external AP took the radio. Forcing set_mode/connect unconditionally
+        // used to re-enable WiFi the user had explicitly turned off.
+        if (wifi.IsStationActive()) {
+            esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+            if (err != ESP_OK) {
+                ESP_LOGW(kTag, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));
+            }
         }
-        err = esp_wifi_connect();
-        if (err != ESP_OK && err != ESP_ERR_WIFI_CONN) {
-            ESP_LOGW(kTag, "esp_wifi_connect failed after AP stop: %s", esp_err_to_name(err));
-        }
-
-        WifiManager::GetInstance().ResumeStationAfterExternalAp();
+        wifi.ResumeStationAfterExternalAp();
     }
 
     if (ap_netif_) {
@@ -475,7 +493,6 @@ bool ApTransferServer::StartHttpServer() {
     config.max_open_sockets = 4;
     config.recv_wait_timeout = 30;  // Large images take time
     config.send_wait_timeout = 10;
-    config.lru_purge_enable = true;
     
     esp_err_t err = httpd_start(&server_, &config);
     if (err != ESP_OK) {
@@ -652,8 +669,21 @@ static void DrainRequestBody(httpd_req_t* req) {
     }
 }
 
+// Reject an unauthorized request: drain the body (so LWIP does not RST the
+// connection before our JSON reaches the client) and answer 401.
+static esp_err_t RejectUnauthorized(httpd_req_t* req) {
+    DrainRequestBody(req);
+    httpd_resp_set_status(req, "401 Unauthorized");
+    SendJson(req, "{\"success\":false,\"error\":\"unauthorized\"}");
+    return ESP_OK;
+}
+
 esp_err_t ApTransferServer::UploadHandler(httpd_req_t* req) {
     auto* self = static_cast<ApTransferServer*>(req->user_ctx);
+
+    if (!CheckRequestAuthorized(req)) {
+        return RejectUnauthorized(req);
+    }
 
     self->NotifyState(kReceivingImage, "Receiving image...");
 
@@ -662,9 +692,16 @@ esp_err_t ApTransferServer::UploadHandler(httpd_req_t* req) {
     // never parses, the size check misfires, and the upload is refused.
     char query[256] = {};
     char format[16] = {};
+    char qtitle[PHOTO_TITLE_LEN] = {};
+    bool have_query = false;
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        have_query = true;
         if (httpd_query_key_value(query, "format", format, sizeof(format)) != ESP_OK)
             format[0] = '\0';
+        // NAS importer sends a percent-encoded file title; keep it for the
+        // gallery entry (decoded below, before photo_save).
+        if (httpd_query_key_value(query, "title", qtitle, sizeof(qtitle)) != ESP_OK)
+            qtitle[0] = '\0';
     }
     const bool is_2bpp = strcmp(format, "bwry2bpp") == 0 || strcmp(format, "2bpp") == 0;
     const size_t expected_size = is_2bpp ? kImage2bppSize : kImage1bppSize;
@@ -686,6 +723,7 @@ esp_err_t ApTransferServer::UploadHandler(httpd_req_t* req) {
 
     auto* buf = static_cast<uint8_t*>(malloc(expected_size));
     if (!buf) {
+        DrainRequestBody(req);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No memory");
         return ESP_FAIL;
     }
@@ -696,6 +734,9 @@ esp_err_t ApTransferServer::UploadHandler(httpd_req_t* req) {
                                  expected_size - received);
         if (ret <= 0) {
             free(buf);
+            // The connection is dying anyway, but draining what already
+            // arrived keeps LWIP from RST-ing before our error is read.
+            DrainRequestBody(req);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Receive failed");
             return ESP_FAIL;
         }
@@ -708,9 +749,43 @@ esp_err_t ApTransferServer::UploadHandler(httpd_req_t* req) {
     PhotoInfo info = {};
     const uint32_t now = static_cast<uint32_t>(time(nullptr));
     const uint64_t ms = static_cast<uint64_t>(esp_timer_get_time() / 1000);
-    snprintf(info.id, sizeof(info.id), "ap%011llu",
-             static_cast<unsigned long long>(ms % 100000000000ULL));
-    snprintf(info.title, sizeof(info.title), is_2bpp ? "WiFi四色图片" : "WiFi黑白图片");
+    // Two uploads in the same millisecond would otherwise collide on id and
+    // the second photo overwrites the first; append a sequence byte.
+    static std::atomic<uint32_t> s_upload_seq{0};
+    snprintf(info.id, sizeof(info.id), "ap%09llu%02x",
+             static_cast<unsigned long long>(ms % 1000000000ULL),
+             static_cast<unsigned>(s_upload_seq.fetch_add(1) & 0xFF));
+    // Use the uploader-provided title when present; fall back to a generic
+    // name. (The query title was previously ignored, so every photo showed
+    // the same "WiFi四色图片" in the gallery.)
+    {
+        // Percent-decode the title captured above (may be empty).
+        std::string decoded;
+        decoded.reserve(48);
+        auto hex_val = [](char c, uint8_t *out) -> bool {
+            if (c >= '0' && c <= '9') { *out = static_cast<uint8_t>(c - '0'); return true; }
+            if (c >= 'a' && c <= 'f') { *out = static_cast<uint8_t>(c - 'a' + 10); return true; }
+            if (c >= 'A' && c <= 'F') { *out = static_cast<uint8_t>(c - 'A' + 10); return true; }
+            return false;
+        };
+        for (const char *p = qtitle; *p; ++p) {
+            if (*p == '%' && p[1] && p[2]) {
+                uint8_t hi = 0, lo = 0;
+                if (hex_val(p[1], &hi) && hex_val(p[2], &lo)) {
+                    decoded.push_back(static_cast<char>((hi << 4) | lo));
+                    p += 2;
+                } else {
+                    decoded.push_back('%');
+                }
+            } else {
+                decoded.push_back(*p);
+            }
+        }
+        if (!decoded.empty()) {
+            strncpy(info.title, decoded.c_str(), sizeof(info.title) - 1);
+            info.title[sizeof(info.title) - 1] = '\0';
+        }
+    }
     snprintf(info.location, sizeof(info.location), "WiFi AP");
     snprintf(info.body, sizeof(info.body), is_2bpp ? "手机 WiFi 传图 · 2 BP 四色" : "手机 WiFi 传图 · 1 BP 黑白");
     info.width = kScreenWidth;
@@ -777,6 +852,9 @@ esp_err_t ApTransferServer::StatusHandler(httpd_req_t* req) {
 
 esp_err_t ApTransferServer::SettingsHandler(httpd_req_t* req) {
     auto* self = static_cast<ApTransferServer*>(req->user_ctx);
+    if (req->method == HTTP_POST && !CheckRequestAuthorized(req)) {
+        return RejectUnauthorized(req);
+    }
     Settings nvs(kGalleryNamespace, req->method == HTTP_POST);
     int interval = nvs.GetInt(kSlideshowIntervalKey, 5);
     bool close_service = false;
@@ -848,6 +926,9 @@ esp_err_t ApTransferServer::SettingsHandler(httpd_req_t* req) {
 }
 
 esp_err_t ApTransferServer::PhotosHandler(httpd_req_t* req) {
+    if (!CheckRequestAuthorized(req)) {
+        return RejectUnauthorized(req);
+    }
     cJSON* root = cJSON_CreateObject();
     cJSON* photos = cJSON_CreateArray();
     if (!root || !photos) {
@@ -891,6 +972,9 @@ esp_err_t ApTransferServer::PhotosHandler(httpd_req_t* req) {
 }
 
 esp_err_t ApTransferServer::PhotoHandler(httpd_req_t* req) {
+    if (!CheckRequestAuthorized(req)) {
+        return RejectUnauthorized(req);
+    }
     char query[64] = {};
     char id[16] = {};
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
@@ -946,6 +1030,9 @@ esp_err_t ApTransferServer::PhotoHandler(httpd_req_t* req) {
 }
 
 esp_err_t ApTransferServer::PhotoMetaHandler(httpd_req_t* req) {
+    if (!CheckRequestAuthorized(req)) {
+        return RejectUnauthorized(req);
+    }
     cJSON* root = ReadJsonBody(req);
     if (!root) {
         SendJson(req, "{\"success\":false,\"error\":\"bad_json\"}");
@@ -985,6 +1072,9 @@ esp_err_t ApTransferServer::PhotoMetaHandler(httpd_req_t* req) {
 }
 
 esp_err_t ApTransferServer::PhotoMoveHandler(httpd_req_t* req) {
+    if (!CheckRequestAuthorized(req)) {
+        return RejectUnauthorized(req);
+    }
     cJSON* root = ReadJsonBody(req);
     if (!root) {
         SendJson(req, "{\"success\":false,\"error\":\"bad_json\"}");
@@ -1006,6 +1096,9 @@ esp_err_t ApTransferServer::PhotoMoveHandler(httpd_req_t* req) {
 }
 
 esp_err_t ApTransferServer::PhotoShowHandler(httpd_req_t* req) {
+    if (!CheckRequestAuthorized(req)) {
+        return RejectUnauthorized(req);
+    }
     cJSON* root = ReadJsonBody(req);
     if (!root) {
         SendJson(req, "{\"success\":false,\"error\":\"bad_json\"}");
@@ -1016,7 +1109,10 @@ esp_err_t ApTransferServer::PhotoShowHandler(httpd_req_t* req) {
     cJSON_Delete(root);
 
     auto* self = static_cast<ApTransferServer*>(req->user_ctx);
-    const bool ok = self && self->show_photo_callback_ && self->show_photo_callback_(id);
+    // Pre-check the id so the response reflects the real outcome; the
+    // callback itself only posts a UI task and cannot report not-found.
+    const bool ok = id[0] != '\0' && photo_exists(id) && self &&
+                    self->show_photo_callback_ && self->show_photo_callback_(id);
     SendJson(req, ok ? "{\"success\":true}" : "{\"success\":false,\"error\":\"not_found\"}");
     return ok ? ESP_OK : ESP_FAIL;
 }
@@ -1024,6 +1120,9 @@ esp_err_t ApTransferServer::PhotoShowHandler(httpd_req_t* req) {
 esp_err_t ApTransferServer::PageShowHandler(httpd_req_t* req) {
     // Web remote-control: switch device screen to a given page.
     // Body: {"page":"weather"}  (page id, one of /page/list)
+    if (!CheckRequestAuthorized(req)) {
+        return RejectUnauthorized(req);
+    }
     cJSON* root = ReadJsonBody(req);
     if (!root) {
         SendJson(req, "{\"success\":false,\"error\":\"bad_json\"}");
@@ -1041,6 +1140,9 @@ esp_err_t ApTransferServer::PageShowHandler(httpd_req_t* req) {
 
 esp_err_t ApTransferServer::PageListHandler(httpd_req_t* req) {
     // Returns JSON array of available pages for the web control panel.
+    if (!CheckRequestAuthorized(req)) {
+        return RejectUnauthorized(req);
+    }
     auto* self = static_cast<ApTransferServer*>(req->user_ctx);
     std::string json = (self && self->page_list_callback_) ? self->page_list_callback_()
                                                            : "[]";
@@ -1057,6 +1159,9 @@ esp_err_t ApTransferServer::ScreenshotSetHandler(httpd_req_t* req) {
         DrainRequestBody(req);
         SendJson(req, "{\"success\":false,\"error\":\"no_ctx\"}");
         return ESP_OK;
+    }
+    if (!CheckRequestAuthorized(req)) {
+        return RejectUnauthorized(req);
     }
 
     char query[256] = {};
@@ -1146,6 +1251,60 @@ esp_err_t ApTransferServer::ScreenshotSetHandler(httpd_req_t* req) {
     return ok ? ESP_OK : ESP_FAIL;
 }
 
+std::string ApTransferServer::GetOrCreateAuthToken() {
+    Settings nvs(kAuthNamespace, true);
+    std::string token = nvs.GetString(kAuthTokenKey, "");
+    if (token.size() == 8) {
+        return token;
+    }
+    char buf[9];
+    snprintf(buf, sizeof(buf), "%08x",
+             static_cast<unsigned>(esp_random() & 0xFFFFFFFFu));
+    nvs.SetString(kAuthTokenKey, buf);
+    ESP_LOGI(kTag, "Generated new device auth token");
+    return buf;
+}
+
+bool ApTransferServer::CheckRequestAuthorized(httpd_req_t* req) {
+    auto* self = static_cast<ApTransferServer*>(req ? req->user_ctx : nullptr);
+    if (self == nullptr) {
+        return false;
+    }
+    // AP mode: joining the physical hotspot already implies proximity.
+    if (self->mode_.load() != TransferMode::kLan) {
+        return true;
+    }
+    char presented[24] = {};
+    bool have = false;
+    const size_t hdr_len = httpd_req_get_hdr_value_len(req, "X-Device-Token");
+    if (hdr_len > 0 && hdr_len < sizeof(presented) &&
+        httpd_req_get_hdr_value_str(req, "X-Device-Token", presented,
+                                    sizeof(presented)) == ESP_OK) {
+        have = true;
+    }
+    if (!have) {
+        // Fallback for simple clients: ?token= query parameter.
+        char query[64] = {};
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+            httpd_query_key_value(query, "token", presented, sizeof(presented)) == ESP_OK) {
+            have = true;
+        }
+    }
+    if (!have) {
+        return false;
+    }
+    const std::string expected = GetOrCreateAuthToken();
+    const size_t plen = strnlen(presented, sizeof(presented));
+    if (plen != expected.size() || plen == 0) {
+        return false;
+    }
+    uint8_t diff = 0;
+    for (size_t i = 0; i < plen; ++i) {
+        diff |= static_cast<uint8_t>(presented[i]) ^ static_cast<uint8_t>(expected[i]);
+    }
+    return diff == 0;
+}
+
 void ApTransferServer::NotifyState(ServerState state, const std::string& message) {
     ESP_LOGI(kTag, "State: %d, message: %s", state, message.c_str());
     if (state_callback_) {
@@ -1191,6 +1350,9 @@ void ApTransferServer::SetLifeBarBirthCallback(LifeBarBirthCallback callback) {
 
 esp_err_t ApTransferServer::LifeBarBirthHandler(httpd_req_t* req) {
     // Body: {"y":1990,"m":1,"d":1} — persists via lifebar_birth_callback_.
+    if (!CheckRequestAuthorized(req)) {
+        return RejectUnauthorized(req);
+    }
     cJSON* root = ReadJsonBody(req);
     if (!root) {
         SendJson(req, "{\"success\":false,\"error\":\"bad_json\"}");

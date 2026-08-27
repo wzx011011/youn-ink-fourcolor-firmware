@@ -10,19 +10,12 @@
 #include <string>
 #include <vector>
 
-struct StorageFileInfo {
-    std::string name;    // filename (e.g. "img123.bin")
-    uint32_t size;       // file size in bytes
-    std::string type;    // "image" or "document"
-};
-
 struct StorageInfo {
     uint32_t total_bytes;
     uint32_t used_bytes;
     uint32_t free_bytes;
     int photo_count;
     int txt_count;
-    std::vector<StorageFileInfo> files;
 };
 
 namespace storage_manager {

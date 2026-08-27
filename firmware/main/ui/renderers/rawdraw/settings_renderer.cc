@@ -1057,13 +1057,20 @@ void SettingsRenderer::SetItems(const std::vector<SettingsItemDef>& items) {
 
     // Try to find the previously selected item in the new list
     if (!prev_label.empty()) {
+        bool found = false;
         for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
             if (items_[i].label == prev_label && items_[i].type != SettingsItemType::Section) {
                 selected_index_ = i;
+                found = true;
                 break;
             }
         }
-        if (items_[selected_index_].type == SettingsItemType::Section) {
+        // The old label may be gone or the list shorter than the old index;
+        // fall back to the first selectable item instead of indexing past
+        // the end below.
+        if (!found || selected_index_ >= static_cast<int>(items_.size()) ||
+            selected_index_ < 0 ||
+            items_[selected_index_].type == SettingsItemType::Section) {
             selected_index_ = GetFirstSelectableIndex();
         }
     } else {

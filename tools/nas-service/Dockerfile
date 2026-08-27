@@ -28,5 +28,8 @@ VOLUME /data
 
 EXPOSE 8096
 
-# 1 worker:PIL 渲染线程安全且轻量,足够;180s 兜底超时
-CMD ["gunicorn", "--bind", "0.0.0.0:8096", "--workers", "1", "--timeout", "180", "--access-logfile", "-", "app:app"]
+# 1 worker(gthread 8 线程):保持单 worker 语义(scheduler 单例成立),
+# 线程池让 LLM/远端 API 长调用不再阻塞其他请求;180s 兜底超时
+CMD ["gunicorn", "--bind", "0.0.0.0:8096", "--workers", "1", \
+     "--worker-class", "gthread", "--threads", "8", \
+     "--timeout", "180", "--access-logfile", "-", "app:app"]

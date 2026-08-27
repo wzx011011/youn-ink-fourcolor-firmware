@@ -38,6 +38,7 @@ firmware/.cache/
 firmware/.claude/
 firmware/__pycache__/
 firmware/build/
+firmware/build*/
 firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/managed_components/
@@ -45,7 +46,6 @@ firmware/releases/
 firmware/debugscreenshot/
 firmware/pagepics/*.png
 firmware/pagepics/*.pbm
-firmware/=
 
 # Server runtime data
 server/__pycache__/
@@ -75,7 +75,6 @@ tools/*.jpg
 
 # 模板渲染预览产物
 tools/_previews/
-firmware/**/*.txt
 tools/nas-service/*_e2e.txt
 tools/nas-service/reg_out.txt
 tools/_inbox/
@@ -83,3 +82,9 @@ tools/import_run.log
 single_push.txt
 old_*.json
 final_verify.txt
+
+# 个人数据 / 本地清单(不入库)
+/final_reg.txt
+/old_ids.json
+/old_photos.json
+tools/uploaded_ids.json

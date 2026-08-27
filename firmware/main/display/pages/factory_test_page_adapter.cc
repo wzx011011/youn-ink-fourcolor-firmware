@@ -6,6 +6,7 @@
 #include <esp_log.h>
 
 #include <cstdio>
+#include <cstring>
 
 namespace {
 
@@ -42,7 +43,9 @@ const char* KeyItemText(const char* raw, FactoryTestStepState* out_state) {
     if (raw == nullptr) {
         return "";
     }
-    if (raw[0] == '[' && raw[2] == ']' && raw[3] == ' ') {
+    // "[x] text" prefix: index raw[0..3] only after checking the length.
+    const size_t raw_len = strlen(raw);
+    if (raw_len >= 4 && raw[0] == '[' && raw[2] == ']' && raw[3] == ' ') {
         if (out_state != nullptr) {
             switch (raw[1]) {
                 case 'x':

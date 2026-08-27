@@ -305,7 +305,8 @@ void DrawCircleBorder(uint8_t* fb, int width, const Point& center, int radius, i
  */
 void DrawText(uint8_t* fb, int width, int x, int y, const char* text,
               const lv_font_t* font, Color color = BLACK,
-              int height = 300);  ///< FB height for y-clipping
+              int height = 0);    ///< Local y-clip for this text only (0 = ambient
+                                    ///< surface height). Does not touch the global hint.
 
 /**
  * @brief Draw single icon from icon font

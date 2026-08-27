@@ -268,13 +268,19 @@ static bool ParseAirJson(const char* json, WeatherData* out) {
 
 static char s_response_buf[4096] = {0};
 static int s_response_len = 0;
+static bool s_response_truncated = false;
 
 static esp_err_t HttpEventHandler(esp_http_client_event_t* evt) {
     switch (evt->event_id) {
         case HTTP_EVENT_ON_DATA:
-            if (s_response_len + evt->data_len < sizeof(s_response_buf)) {
+            if (s_response_len + evt->data_len < (int)sizeof(s_response_buf)) {
                 memcpy(s_response_buf + s_response_len, evt->data, evt->data_len);
                 s_response_len += evt->data_len;
+            } else if (!s_response_truncated) {
+                // Warn once per response; larger bodies are cut off.
+                ESP_LOGW(kTag, "HTTP response exceeds %u bytes, truncating",
+                         (unsigned)sizeof(s_response_buf));
+                s_response_truncated = true;
             }
             break;
         default:
@@ -285,6 +291,7 @@ static esp_err_t HttpEventHandler(esp_http_client_event_t* evt) {
 
 static bool HttpGet(const char* url) {
     s_response_len = 0;
+    s_response_truncated = false;
     memset(s_response_buf, 0, sizeof(s_response_buf));
 
     esp_http_client_config_t config = {};
@@ -320,14 +327,9 @@ static bool HttpGet(const char* url) {
     return true;
 }
 
-static void DoFetch() {
-    if (!s_initialized.load(std::memory_order_acquire)) return;
-
-    bool expected = false;
-    if (!s_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-        return;
-    }
-
+// One full fetch pass (now + forecast + air). Assumes the caller holds the
+// s_in_progress gate. Returns true only if current weather was fetched.
+static bool FetchOnce() {
     char api_key[sizeof(s_api_key)] = {};
     char city_code[sizeof(s_city_code)] = {};
     WeatherCallback callback;
@@ -340,8 +342,7 @@ static void DoFetch() {
 
     if (!api_key[0] || !city_code[0]) {
         ESP_LOGE(kTag, "API key or city code not set");
-        s_in_progress.store(false, std::memory_order_release);
-        return;
+        return false;
     }
 
     WeatherData data;
@@ -353,8 +354,7 @@ static void DoFetch() {
     ESP_LOGI(kTag, "Fetching current weather: %s", url);
     if (!HttpGet(url) || !ParseNowJson(s_response_buf, &data)) {
         ESP_LOGE(kTag, "Failed to fetch or parse current weather");
-        s_in_progress.store(false, std::memory_order_release);
-        return;
+        return false;
     }
 
     snprintf(url, sizeof(url),
@@ -386,6 +386,25 @@ static void DoFetch() {
     if (callback) {
         callback(data);
     }
+    return true;
+}
+
+static void DoFetch() {
+    if (!s_initialized.load(std::memory_order_acquire)) return;
+
+    bool expected = false;
+    if (!s_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        // A fetch is already running; it re-checks s_fetch_pending before
+        // finishing, so this request will be served by that pass.
+        return;
+    }
+
+    // Consume the pending flag; re-check after each pass so requests made
+    // while a fetch was in flight (e.g. weather_api_set_city()) are served
+    // instead of dropped.
+    while (s_fetch_pending.exchange(false, std::memory_order_acq_rel)) {
+        FetchOnce();
+    }
 
     s_in_progress.store(false, std::memory_order_release);
 }
@@ -397,26 +416,19 @@ static void DoFetch() {
 static void WeatherWorker(void*) {
     while (true) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        s_fetch_pending.store(false, std::memory_order_release);
         DoFetch();
     }
 }
 
 static bool RequestFetch() {
-    if (!s_initialized.load(std::memory_order_acquire) ||
-        s_in_progress.load(std::memory_order_acquire)) {
+    if (!s_initialized.load(std::memory_order_acquire) || s_worker_task == nullptr) {
         return false;
     }
 
-    bool expected = false;
-    if (!s_fetch_pending.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-        return false;
-    }
-
-    if (s_worker_task == nullptr) {
-        s_fetch_pending.store(false, std::memory_order_release);
-        return false;
-    }
+    // Always flag and notify, even while a fetch is in progress: DoFetch()
+    // re-checks s_fetch_pending when it finishes, so the request triggers a
+    // follow-up fetch instead of being dropped.
+    s_fetch_pending.store(true, std::memory_order_release);
     xTaskNotifyGive(s_worker_task);
     return true;
 }
@@ -432,6 +444,7 @@ static void TimerCallback(void* arg) {
 // ============================================================
 
 void weather_api_init(const char* api_key, const char* city_code, WeatherCallback callback) {
+    char city_log[sizeof(s_city_code)] = {};
     {
         std::lock_guard<std::mutex> lock(s_state_mutex);
         if (s_initialized.load(std::memory_order_acquire)) {
@@ -440,12 +453,19 @@ void weather_api_init(const char* api_key, const char* city_code, WeatherCallbac
         }
         strlcpy(s_api_key, api_key ? api_key : "", sizeof(s_api_key));
         strlcpy(s_city_code, city_code ? city_code : "", sizeof(s_city_code));
+        strlcpy(city_log, s_city_code, sizeof(city_log));
         s_callback = std::move(callback);
+        // Set inside the lock so a concurrent second init cannot slip past
+        // the check above before setup completes (double-init race fix).
+        s_initialized.store(true, std::memory_order_release);
     }
 
-    if (xTaskCreate(&WeatherWorker, "weather_fetch", 8192, nullptr, 4, &s_worker_task) != pdPASS) {
+    // HTTPS/TLS needs a deep stack; other networked tasks in this project
+    // use 16K as well.
+    if (xTaskCreate(&WeatherWorker, "weather_fetch", 16384, nullptr, 4, &s_worker_task) != pdPASS) {
         ESP_LOGE(kTag, "Failed to create weather worker task");
         s_worker_task = nullptr;
+        s_initialized.store(false, std::memory_order_release);
         return;
     }
 
@@ -466,12 +486,10 @@ void weather_api_init(const char* api_key, const char* city_code, WeatherCallbac
         ESP_LOGE(kTag, "Failed to create timer");
     }
 
-    s_initialized.store(true, std::memory_order_release);
-
     // Fetch immediately on the dedicated worker, never on the timer task.
     RequestFetch();
 
-    ESP_LOGI(kTag, "Weather API initialized: city=%s", s_city_code);
+    ESP_LOGI(kTag, "Weather API initialized: city=%s", city_log);
 }
 
 bool weather_api_fetch_now() {
@@ -484,9 +502,10 @@ void weather_api_set_city(const char* city_code) {
         std::lock_guard<std::mutex> lock(s_state_mutex);
         strlcpy(s_city_code, city_code, sizeof(s_city_code));
     }
-    ESP_LOGI(kTag, "City changed to: %s", s_city_code);
+    ESP_LOGI(kTag, "City changed to: %s", city_code);
 
-    // Fetch new data for new city
+    // Fetch new data for new city. If a fetch is already in progress the
+    // request is flagged and served by a follow-up pass (see RequestFetch).
     weather_api_fetch_now();
 }
 
@@ -497,6 +516,9 @@ void weather_api_set_key(const char* api_key) {
 }
 
 const char* weather_api_get_city() {
+    // Snapshot under the lock; s_city_code may be rewritten concurrently by
+    // weather_api_set_city().
+    std::lock_guard<std::mutex> lock(s_state_mutex);
     return s_city_code;
 }
 
@@ -504,6 +526,9 @@ bool weather_api_is_ready() {
     return s_initialized.load(std::memory_order_acquire);
 }
 
-const WeatherData* weather_api_get_last_data() {
-    return &s_last_data;
+WeatherData weather_api_get_last_data() {
+    // Return a value copy under the lock: s_last_data is rewritten by the
+    // fetch worker, so handing out a pointer would be a data race.
+    std::lock_guard<std::mutex> lock(s_state_mutex);
+    return s_last_data;
 }

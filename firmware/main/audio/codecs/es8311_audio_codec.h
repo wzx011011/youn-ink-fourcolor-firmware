@@ -20,7 +20,16 @@ private:
     esp_codec_dev_handle_t dev_ = nullptr;
     gpio_num_t pa_pin_ = GPIO_NUM_NC;
     bool pa_inverted_ = false;
+    // Lock order (must never be nested the other way around):
+    //   data_if_mutex_ -> dev_mutex_
+    // - data_if_mutex_: serializes the control path (EnableInput/EnableOutput/
+    //   SetOutputVolume, i.e. UpdateDeviceState()).
+    // - dev_mutex_: guards the lifetime of dev_ (open/close/delete) and its
+    //   use by Read()/Write(). Read()/Write() take ONLY dev_mutex_, so they
+    //   never run concurrently with the close/delete sequence that would
+    //   otherwise free the device under them (use-after-free fix).
     std::mutex data_if_mutex_;
+    std::mutex dev_mutex_;
 
     void CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din);
     void UpdateDeviceState();

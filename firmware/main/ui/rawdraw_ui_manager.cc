@@ -708,12 +708,13 @@ bool RawDrawUiManager::TryDisplayCurrentPhotoRaw4Color() {
     return shown;
 }
 
-const std::array<RawDrawUiManager::QuickSwitchItem, 11>& RawDrawUiManager::GetQuickSwitchItems() {
-    static const std::array<QuickSwitchItem, 11> kItems = {{
+// News is intentionally absent: the renderer has no data source wired, so
+// the page would only ever show the empty state (and cost a full refresh).
+const std::array<RawDrawUiManager::QuickSwitchItem, 10>& RawDrawUiManager::GetQuickSwitchItems() {
+    static const std::array<QuickSwitchItem, 10> kItems = {{
         {RawDrawPageId::Gallery,      "相册",     FA_SETTINGS_IMAGE},
         {RawDrawPageId::Weather,      "天气",     nullptr},
         {RawDrawPageId::Calendar,     "日历",     nullptr},
-        {RawDrawPageId::News,         "热点",     nullptr},
         {RawDrawPageId::Ebook,        "电子书",   nullptr},
         {RawDrawPageId::LifeBar,      "人生进度", nullptr},
         {RawDrawPageId::YearProgress, "年度进度", nullptr},
@@ -798,12 +799,42 @@ bool RawDrawUiManager::HandleInput(const rawdraw::ButtonEvent& event) {
         }
 
         if (current_page_ == RawDrawPageId::Gallery) {
-            ESP_LOGI(kTag, "Gallery long press BOOT - entering AP transfer mode");
-            StartApTransferMode();
+            // While a modal surface is open (quick-switch overlay or the
+            // gallery's delete dialog), BOOT-long belongs to that modal —
+            // routing it to the global "enter AP transfer" shortcut used to
+            // escape the dialog and start transfer mode in one press.
+            const bool modal_open =
+                quick_switch_open_ ||
+                (photo_gallery_renderer_ && photo_gallery_renderer_->IsDeleteDialogOpen());
+            if (!modal_open) {
+                ESP_LOGI(kTag, "Gallery long press BOOT - entering AP transfer mode");
+                StartApTransferMode();
+                return true;
+            }
+            // Fall through so the gallery renderer can consume it (the delete
+            // dialog treats BOOT-long as cancel).
+        }
+    }
+
+    if (event.type == rawdraw::ButtonEvent::kUpLongPress) {
+        // UP-long on Gallery opens the full-screen photo detail page for the
+        // currently selected photo; on PhotoDetail it goes back. (BOOT-double
+        // on Gallery is already bound to the delete dialog, so it cannot be
+        // the detail entry.)
+        if (current_page_ == RawDrawPageId::Gallery && photo_gallery_renderer_ &&
+            photo_gallery_renderer_->GetPhotoCount() > 0) {
+            if (photo_detail_renderer_) {
+                photo_detail_renderer_->SetSelection(photo_gallery_renderer_->GetSelectedIndex());
+            }
+            SwitchPage(RawDrawPageId::PhotoDetail);
+            return true;
+        }
+        if (current_page_ == RawDrawPageId::PhotoDetail) {
+            SwitchPage(RawDrawPageId::Gallery);
             return true;
         }
     }
-    
+
     if (event.type == rawdraw::ButtonEvent::kBootDoubleClick) {
 #if 0
         // Disabled during hardware screenshot verification. BOOT double-click
@@ -814,21 +845,6 @@ bool RawDrawUiManager::HandleInput(const rawdraw::ButtonEvent& event) {
         }
         if (current_page_ == RawDrawPageId::WeatherDetail) {
             SwitchPage(RawDrawPageId::Weather);
-            return true;
-        }
-#endif
-#if 0
-        // Disabled for now: BOOT double-click must remain global screenshot on
-        // gallery so real hardware captures can report the memory-card layout.
-        if (current_page_ == RawDrawPageId::Gallery) {
-            if (photo_detail_renderer_ && photo_gallery_renderer_) {
-                photo_detail_renderer_->SetSelection(photo_gallery_renderer_->GetSelectedIndex());
-            }
-            SwitchPage(RawDrawPageId::PhotoDetail);
-            return true;
-        }
-        if (current_page_ == RawDrawPageId::PhotoDetail) {
-            SwitchPage(RawDrawPageId::Gallery);
             return true;
         }
 #endif
@@ -1500,7 +1516,6 @@ const PageIdEntry kUserPages[] = {
     {"gallery",      "相册",     RawDrawPageId::Gallery},
     {"weather",      "天气",     RawDrawPageId::Weather},
     {"calendar",     "日历",     RawDrawPageId::Calendar},
-    {"news",         "热点",     RawDrawPageId::News},
     {"ebook",        "电子书",   RawDrawPageId::Ebook},
     {"lifebar",      "人生进度", RawDrawPageId::LifeBar},
     {"yearprogress", "年度进度", RawDrawPageId::YearProgress},
