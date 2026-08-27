@@ -554,16 +554,17 @@ void PhotoGalleryRenderer::RenderFullscreenMode(uint8_t* fb, int width, int heig
     const int expected_rows = (bwry2bpp || IsMono1bppImage(current_photo_width_, current_photo_height_, current_photo_size_))
                                   ? std::min<int>(current_photo_height_, current_photo_size_ / photo_byte_width)
                                   : 0;
-    int start_y = (height - expected_rows) / 2;
-    if (start_y < 0) start_y = 0;
-
-    const int draw_w = std::min(width, current_photo_width_);
-    const int start_x = std::max(0, (width - draw_w) / 2);
-    for (int row = 0; row < expected_rows && (start_y + row) < height; row++) {
-        for (int tx = 0; tx < draw_w; ++tx) {
+    // Stretch to fill the entire panel edge-to-edge. 400x300 source images
+    // blit 1:1; anything else scales nearest-neighbor so there is never a
+    // letterbox margin around the photo.
+    for (int ty = 0; ty < height; ++ty) {
+        const int row = (ty * expected_rows) / std::max(1, height);
+        if (row >= expected_rows) break;
+        for (int tx = 0; tx < width; ++tx) {
+            const int src_x = (tx * current_photo_width_) / std::max(1, width);
             const Color src_color = ReadPhotoPixelColor(current_photo_data_, current_photo_size_,
-                                                        current_photo_width_, bwry2bpp, tx, row);
-            set_pixel(fb, width, start_x + tx, start_y + row, src_color);
+                                                        current_photo_width_, bwry2bpp, src_x, row);
+            set_pixel(fb, width, tx, ty, src_color);
         }
     }
 

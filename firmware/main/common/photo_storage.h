@@ -16,7 +16,7 @@
 #include <stdbool.h>
 #include <string>
 
-#define PHOTO_MAX_PHOTOS 50
+#define PHOTO_MAX_PHOTOS 200  // 8MB assets partition fits ~200 2bpp photos
 #define PHOTO_MAX_PATH 64
 #define PHOTO_TITLE_LEN 64
 #define PHOTO_DATE_LEN 24

@@ -106,33 +106,23 @@ void PhotoDetailRenderer::Render(uint8_t* fb, int width, int height) {
         modal.CenterInScreen(width, height, 52);
         modal.Draw(fb, width, height);
     } else {
-        // 图片详情页去掉底栏，最大化展示区域
-        const int frame_x = 8;
-        const int frame_y = Style::kStatusBarHeight + 4;
-        const int frame_w = width - 16;
-        const int frame_h = height - frame_y - 4;
-        DrawStyledRoundRect(fb, width, height, {frame_x, frame_y, frame_w, frame_h},
-                            Style::kBorderRadiusMD, theme.Component(ComponentRole::CardDefault));
-
+        // True full-screen: the photo IS the page — no frame, no padding,
+        // no card chrome. 400x300 photos blit 1:1 edge to edge.
         const bool bwry2bpp = IsBwry2bppImage(current_photo_width_, current_photo_height_, current_photo_size_);
         const int photo_byte_width = bwry2bpp ? BytesPerRow2bpp(current_photo_width_)
                                               : BytesPerRow1bpp(current_photo_width_);
         const int expected_rows = (bwry2bpp || IsMono1bppImage(current_photo_width_, current_photo_height_, current_photo_size_))
                                       ? std::min<int>(current_photo_height_, current_photo_size_ / photo_byte_width)
                                       : 0;
-        const int inner_x = frame_x + 6;
-        const int inner_y = frame_y + 6;
-        const int inner_w = frame_w - 12;
-        const int inner_h = frame_h - 12;
 
-        for (int ty = 0; ty < inner_h; ++ty) {
-            const int src_y = (ty * current_photo_height_) / std::max(1, inner_h);
+        for (int ty = 0; ty < height; ++ty) {
+            const int src_y = (ty * current_photo_height_) / std::max(1, height);
             if (src_y >= expected_rows) break;
-            for (int tx = 0; tx < inner_w; ++tx) {
-                const int src_x = (tx * current_photo_width_) / std::max(1, inner_w);
+            for (int tx = 0; tx < width; ++tx) {
+                const int src_x = (tx * current_photo_width_) / std::max(1, width);
                 const Color src_color = ReadPhotoPixelColor(current_photo_data_, current_photo_size_,
                                                             current_photo_width_, bwry2bpp, src_x, src_y);
-                set_pixel(fb, width, inner_x + tx, inner_y + ty, src_color);
+                set_pixel(fb, width, tx, ty, src_color);
             }
         }
     }

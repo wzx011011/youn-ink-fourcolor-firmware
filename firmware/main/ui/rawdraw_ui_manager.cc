@@ -959,6 +959,7 @@ void RawDrawUiManager::RenderAll(uint8_t* fb, int width, int height) {
         current_page_ == RawDrawPageId::Weather ||
         current_page_ == RawDrawPageId::WeatherDetail ||
         current_page_ == RawDrawPageId::News ||
+        current_page_ == RawDrawPageId::PhotoDetail ||
         current_page_ == RawDrawPageId::Screenshot;
 
     // Update central_text based on current page state
