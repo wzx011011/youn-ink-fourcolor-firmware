@@ -81,3 +81,4 @@ tools/nas-service/reg_out.txt
 tools/_inbox/
 tools/import_run.log
 single_push.txt
+old_*.json
