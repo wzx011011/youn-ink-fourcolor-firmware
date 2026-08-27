@@ -80,3 +80,4 @@ tools/nas-service/*_e2e.txt
 tools/nas-service/reg_out.txt
 tools/_inbox/
 tools/import_run.log
+single_push.txt
