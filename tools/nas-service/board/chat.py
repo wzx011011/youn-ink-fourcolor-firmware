@@ -20,10 +20,12 @@ from board.pil_renderer import (
 )
 from board.config_store import CONFIG_PATH
 
-# dify 默认经其 nginx 暂露在本机 28080;换端口改这里
+# dify 默认经其 nginx 暴露在本机 28080;换端口改这里
 DIFY_BASE = os.environ.get("DIFY_BASE", "http://127.0.0.1:28080")
-# 智谱开放平台(OpenAI 兼容格式)
-ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+# 智谱:GLM Coding Plan 订阅 key 走专属端点(/api/coding/paas/v4),
+# 普通按量付费 key 走 /api/paas/v4。同一 OpenAI 兼容协议。
+ZHIPU_BASE_CODING = "https://open.bigmodel.cn/api/coding/paas/v4"
+ZHIPU_BASE_PAYGO = "https://open.bigmodel.cn/api/paas/v4"
 DEFAULT_ZHIPU_MODEL = os.environ.get("ZHIPU_MODEL", "glm-5.3-flash")
 
 
@@ -83,34 +85,48 @@ def _post_json(url, body, headers, timeout):
 # ===== Backends =====
 
 def _ask_zhipu(question: str, cfg: dict) -> dict:
-    """智谱 GLM 直连(open.bigmodel.cn, OpenAI chat/completions 格式)。"""
+    """智谱 GLM 直连。Coding Plan 订阅 key 优先走专属端点;普通按量 key
+    走开放平台端点。两端口协议一致,失败时自动回退。"""
     key = (cfg.get("zhipu_api_key") or "").strip()
     if not key:
         return {"ok": False, "error": "未配置智谱 API Key",
                 "hint": "在 NAS 设置页粘贴后重试"}
     model = cfg.get("zhipu_model") or DEFAULT_ZHIPU_MODEL
-    try:
-        raw = _post_json(
-            ZHIPU_URL,
-            {"model": model,
-             "messages": [
-                 {"role": "system",
-                  "content": "你是一个墨水屏看板助手。回答务必简短精炼,"
-                             "不超过200字,分点叙述优先。"},
-                 {"role": "user", "content": question},
-             ],
-             "temperature": 0.7},
-            {"Authorization": f"Bearer {key}",
-             "Content-Type": "application/json"},
-            timeout=90,
-        )
-        answer = ((raw.get("choices") or [{}])[0].get("message") or {}) \
-            .get("content", "").strip()
-    except Exception as e:
-        return {"ok": False, "error": f"智谱调用失败: {e}",
-                "hint": "", "answer": "", "question": question}
-    return {"ok": True, "answer": answer,
-            "question": question, "model": model}
+    payload = {"model": model,
+               "messages": [
+                   {"role": "system",
+                    "content": "你是一个墨水屏看板助手。回答务必简短精炼,"
+                               "不超过200字,分点叙述优先。"},
+                   {"role": "user", "content": question},
+               ],
+               "temperature": 0.7}
+    headers = {"Authorization": f"Bearer {key}",
+               "Content-Type": "application/json"}
+    last_err = None
+    for base in (ZHIPU_BASE_CODING, ZHIPU_BASE_PAYGO):
+        try:
+            raw = _post_json(f"{base}/chat/completions", payload, headers,
+                             timeout=90)
+            answer = ((raw.get("choices") or [{}])[0].get("message") or {}) \
+                .get("content", "").strip()
+            if answer:
+                return {"ok": True, "answer": answer,
+                        "question": question, "model": model}
+            last_err = f"空回答({base.split('/api/')[1]})"
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode(errors="replace")[:120]
+            except Exception:
+                pass
+            # 1113 余额不足(按量端点对订阅key)→ 换端点;其他 4xx 直接报
+            last_err = f"HTTP {e.code}: {body}"
+            if e.code not in (401, 403, 429):
+                break
+        except Exception as e:
+            last_err = str(e)
+    return {"ok": False, "error": f"智谱调用失败: {last_err}",
+            "hint": "", "answer": "", "question": question}
 
 
 def _ask_dify(question: str, cfg: dict) -> dict:
